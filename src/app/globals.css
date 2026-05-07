@@ -1,0 +1,97 @@
+﻿@import "tailwindcss";
+
+/* ===========================================================
+   Variation C — editorial Training tokens
+   Source: .design/c-tokens.jsx
+   =========================================================== */
+@theme inline {
+  /* Light palette */
+  --color-paper:      #F7FCFF;
+  --color-cream:      #EAF7FF;
+  --color-surface:    #FFFFFF;
+  --color-ink:        #102A43;
+  --color-ink-soft:   #29445E;
+  --color-muted:      #6B8296;
+  --color-line:       #CFE5F5;
+  --color-line-soft:  #DFF1FB;
+  --color-forest:     #2D9CDB;
+  --color-forest-deep:#1478B8;
+  --color-sage:       #D8F1FF;
+  --color-sage-deep:  #A9DFFF;
+  --color-gold:       #F4B740;
+  --color-gold-soft:  #FFE2A3;
+  --color-terra:      #D46A5B;
+  --color-danger:     #B54040;
+  --color-info:       #1E88C8;
+
+  /* Font families — wired to next/font CSS variables in layout.tsx */
+  --font-sans:  var(--font-geist), -apple-system, system-ui, sans-serif;
+  --font-serif: var(--font-newsreader), "Cormorant Garamond", Georgia, serif;
+  --font-mono:  var(--font-jetbrains-mono), ui-monospace, monospace;
+  --font-beng:  var(--font-hind-siliguri), "Noto Sans Bengali", system-ui, sans-serif;
+  --font-deva:  var(--font-hind), "Noto Sans Devanagari", system-ui, sans-serif;
+
+  /* Radius scale */
+  --radius-sm:   4px;
+  --radius:      10px;
+  --radius-md:   12px;
+  --radius-lg:   14px;
+  --radius-xl:   18px;
+  --radius-pill: 999px;
+}
+
+/* Dark-mode tokens (installed but unused in v1) */
+:root[data-theme="dark"] {
+  --color-paper:      #071B2B;
+  --color-cream:      #0D2638;
+  --color-surface:    #113047;
+  --color-ink:        #EFF9FF;
+  --color-ink-soft:   #C8E8FA;
+  --color-muted:      #7EA8C2;
+  --color-line:       #1C4661;
+  --color-line-soft:  #14364E;
+  --color-forest:     #67C7F2;
+  --color-forest-deep:#9BDCFA;
+  --color-sage:       #123C56;
+  --color-sage-deep:  #1D5B7E;
+  --color-gold:       #F4B740;
+  --color-gold-soft:  #E5D2A1;
+  --color-terra:      #D27859;
+  --color-danger:     #D26565;
+  --color-info:       #7BAED3;
+}
+
+html {
+  scroll-behavior: smooth;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Hide scrollbar utility */
+.hide-scrollbar::-webkit-scrollbar { display: none; }
+.hide-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Pulse animation for voice states */
+@keyframes mic-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.1); opacity: 0.8; }
+}
+.mic-pulse { animation: mic-pulse 1.5s ease-in-out infinite; }
+
+/* Coach-mark tooltip entrance */
+@keyframes hint-fade-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.hint-fade-in { animation: hint-fade-in 260ms ease-out both; }
+
+
