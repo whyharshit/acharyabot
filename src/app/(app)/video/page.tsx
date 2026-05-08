@@ -66,7 +66,11 @@ export default function VideoPage() {
     <div className="max-w-5xl mx-auto px-4 lg:px-6 py-5">
       <div className="mb-4">
         <Tag tone="muted">
-          Video Library · {videos.length} Orientation Videos
+          {lang === 'bn'
+            ? `ভিডিও লাইব্রেরি · ${videos.length}টি অরিয়েন্টেশন ভিডিও`
+            : lang === 'hi'
+            ? `वीडियो लाइब्रेरी · ${videos.length} ओरिएंटेशन वीडियो`
+            : `Video Library · ${videos.length} Orientation Videos`}
         </Tag>
       </div>
 
@@ -87,7 +91,7 @@ export default function VideoPage() {
               <button
                 onClick={() => setPlayingId(video.youtube_id)}
                 className="relative w-full aspect-video bg-line group focus:outline-none focus-visible:ring-2 focus-visible:ring-forest"
-                aria-label={`Play ${getTitle(video, lang)}`}
+                aria-label={`${t('watchVideo', lang)} ${getTitle(video, lang)}`}
               >
                 <img
                   src={`https://img.youtube.com/vi/${video.youtube_id}/hqdefault.jpg`}

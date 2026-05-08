@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Avatar } from "@/components/ui/Avatar";
 import { Icon } from "@/components/ui/Icon";
+import { api } from "@/lib/api-client";
 import { useStore } from "@/lib/store";
 import { t } from "@/lib/i18n/labels";
 import { TABS, activeTabKey } from "./tabs";
@@ -15,11 +16,19 @@ interface Props {
 
 export default function TopNavBar({ className = "" }: Props) {
   const pathname = usePathname();
-  const { lang } = useStore();
+  const { lang, userPhone, clearUser } = useStore();
 
   if (pathname.startsWith("/admin")) return null;
 
   const active = activeTabKey(pathname);
+
+  async function handleLogout() {
+    try {
+      await api.phoneAuth.logout();
+    } finally {
+      clearUser();
+    }
+  }
 
   return (
     <header
@@ -27,12 +36,12 @@ export default function TopNavBar({ className = "" }: Props) {
     >
       <div className="flex items-center justify-between gap-4 w-full max-w-7xl mx-auto px-5 py-2.5">
         {/* Left: brand only */}
-        <Link href="/" className="flex items-center gap-2.5 shrink-0" aria-label="Home">
+        <Link href="/" className="flex items-center gap-2.5 shrink-0" aria-label={t("home", lang)}>
           <Avatar size={30} useImage />
           <div className="leading-tight hidden xl:block">
-            <div className="font-serif italic text-base text-ink">Vajra Acharya</div>
+            <div className="font-serif italic text-base text-ink">{t("appName", lang)}</div>
             <div className="font-mono text-[9px] tracking-[0.18em] uppercase text-muted">
-              Electrician Training
+              {t("appTraining", lang)}
             </div>
           </div>
         </Link>
@@ -67,6 +76,18 @@ export default function TopNavBar({ className = "" }: Props) {
         <div className="flex items-center gap-2 xl:gap-3 shrink-0">
           <ModuleSelector />
           <LangSelector />
+          {userPhone && (
+            <button
+              type="button"
+              onClick={handleLogout}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-line bg-cream text-ink hover:bg-sage transition-colors text-[12px] font-semibold whitespace-nowrap"
+              aria-label={t("logout", lang)}
+              title={t("logout", lang)}
+            >
+              <Icon name="close" size={13} strokeWidth={2} />
+              <span>{t("logout", lang)}</span>
+            </button>
+          )}
         </div>
       </div>
     </header>

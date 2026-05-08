@@ -4,7 +4,7 @@ import { useMemo } from "react";
 import { useStore } from "@/lib/store";
 import labels, { t } from "@/lib/i18n/labels";
 import type { Lang } from "@/lib/types";
-import { getTitle } from "@/lib/types";
+import { getGroupLabel, getTitle } from "@/lib/types";
 import { Dropdown, type DropdownOption } from "@/components/ui/Dropdown";
 
 interface Props {
@@ -24,7 +24,7 @@ export function ModuleSelector({ variant = "compact" }: Props) {
           ? t("compulsory", lang)
           : mod.group_key === "elective"
           ? t("elective", lang)
-          : mod.group_key,
+          : getGroupLabel(mod, lang),
     }));
   }, [modules, lang]);
 
@@ -56,9 +56,9 @@ export function LangSelector({ variant = "compact" }: Props) {
   const { lang, setLang } = useStore();
 
   const options: DropdownOption[] = [
-    { value: "bn", label: labels.langNames.bn, sublabel: "Bengali" },
-    { value: "hi", label: labels.langNames.hi, sublabel: "Hindi" },
-    { value: "en", label: labels.langNames.en, sublabel: "English" },
+    { value: "bn", label: labels.langNames.bn, sublabel: lang === "bn" ? "বাংলা" : lang === "hi" ? "बांग्ला" : "Bengali" },
+    { value: "hi", label: labels.langNames.hi, sublabel: lang === "bn" ? "হিন্দি" : lang === "hi" ? "हिन्दी" : "Hindi" },
+    { value: "en", label: labels.langNames.en, sublabel: lang === "bn" ? "ইংরেজি" : lang === "hi" ? "अंग्रेज़ी" : "English" },
   ];
 
   return (

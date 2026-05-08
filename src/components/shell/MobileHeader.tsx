@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import { Avatar } from "@/components/ui/Avatar";
 import { Icon } from "@/components/ui/Icon";
 import { Tag } from "@/components/ui/Tag";
+import { api } from "@/lib/api-client";
 import { useStore } from "@/lib/store";
 import { t } from "@/lib/i18n/labels";
 import { TABS, activeTabKey } from "./tabs";
@@ -19,7 +20,7 @@ const HINT_KEY = "vajra-acharya-menu-hint-seen";
 
 export default function MobileHeader({ className = "" }: Props) {
   const pathname = usePathname();
-  const { lang, voiceEnabled, toggleVoice } = useStore();
+  const { lang, userPhone, voiceEnabled, toggleVoice, clearUser } = useStore();
   const [open, setOpen] = useState(false);
   const [showHint, setShowHint] = useState(false);
 
@@ -88,6 +89,15 @@ export default function MobileHeader({ className = "" }: Props) {
     try { sessionStorage.setItem(HINT_KEY, "1"); } catch {}
   }
 
+  async function handleLogout() {
+    try {
+      await api.phoneAuth.logout();
+    } finally {
+      setOpen(false);
+      clearUser();
+    }
+  }
+
   if (pathname.startsWith("/admin")) return null;
 
   const active = activeTabKey(pathname);
@@ -100,12 +110,12 @@ export default function MobileHeader({ className = "" }: Props) {
         className={`lg:hidden sticky top-0 z-30 bg-paper/95 backdrop-blur border-b border-line ${className}`}
       >
         <div className="flex items-center justify-between px-4 py-2.5">
-          <Link href="/" className="flex items-center gap-2.5 min-w-0" aria-label="Home">
+          <Link href="/" className="flex items-center gap-2.5 min-w-0" aria-label={t("home", lang)}>
             <Avatar size={32} useImage />
             <div className="leading-tight min-w-0">
-              <div className="font-serif italic text-base text-ink truncate">Vajra Acharya</div>
+              <div className="font-serif italic text-base text-ink truncate">{t("appName", lang)}</div>
               <div className="font-mono text-[8px] tracking-[0.18em] uppercase text-muted truncate">
-                {currentLabel || "Electrician Training"}
+                {currentLabel || t("appTraining", lang)}
               </div>
             </div>
           </Link>
@@ -169,16 +179,16 @@ export default function MobileHeader({ className = "" }: Props) {
               <div className="flex items-center gap-2.5">
                 <Avatar size={28} useImage />
                 <div className="leading-tight">
-                  <div className="font-serif italic text-sm text-ink">Vajra Acharya</div>
+                  <div className="font-serif italic text-sm text-ink">{t("appName", lang)}</div>
                   <div className="font-mono text-[8px] tracking-[0.18em] uppercase text-muted">
-                    Electrician Training
+                    {t("appTraining", lang)}
                   </div>
                 </div>
               </div>
               <button
                 type="button"
                 onClick={() => setOpen(false)}
-                aria-label="Close"
+                aria-label={lang === "bn" ? "বন্ধ করুন" : lang === "hi" ? "बंद करें" : "Close"}
                 className="p-1.5 rounded-full hover:bg-cream"
               >
                 <Icon name="close" size={20} />
@@ -240,7 +250,9 @@ export default function MobileHeader({ className = "" }: Props) {
                   >
                     <span className="flex items-center gap-2 text-sm font-medium">
                       <Icon name={voiceEnabled ? "speaker" : "speakerOff"} size={18} />
-                      {voiceEnabled ? "On" : "Off"}
+                      {voiceEnabled
+                        ? lang === "bn" ? "চালু" : lang === "hi" ? "चालू" : "On"
+                        : lang === "bn" ? "বন্ধ" : lang === "hi" ? "बंद" : "Off"}
                     </span>
                     <span
                       className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
@@ -273,6 +285,19 @@ export default function MobileHeader({ className = "" }: Props) {
                   <span className="text-sm font-medium">Admin</span>
                   <Icon name="arrowR" size={16} />
                 </Link>
+                {userPhone && (
+                  <button
+                    type="button"
+                    onClick={handleLogout}
+                    className="w-full flex items-center justify-between px-4 py-3 rounded-xl border border-line bg-cream text-ink hover:bg-sage transition-colors"
+                  >
+                    <span className="flex items-center gap-2 text-sm font-medium">
+                      <Icon name="close" size={16} />
+                      {t("logout", lang)}
+                    </span>
+                    <span className="font-mono text-[10px] text-muted">{userPhone.slice(-4)}</span>
+                  </button>
+                )}
               </div>
             </div>
           </div>

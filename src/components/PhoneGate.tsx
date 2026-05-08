@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Avatar } from '@/components/ui/Avatar';
 import { api, ApiError } from '@/lib/api-client';
+import { t } from '@/lib/i18n/labels';
 import { useStore } from '@/lib/store';
 import { formatIndianPhone, normalizeIndianPhone } from '@/lib/phone';
 import type { Lang } from '@/lib/types';
@@ -17,6 +18,60 @@ import type { Lang } from '@/lib/types';
 
 type Step = 'phone' | 'otp';
 
+const copy = {
+  bn: {
+    productLine: 'ইলেকট্রিক্যাল সেফটি ও ওয়্যারিং',
+    signIn: 'ফোন দিয়ে সাইন ইন',
+    mobile: 'মোবাইল নম্বর',
+    invalidPhone: 'সঠিক ১০ সংখ্যার ভারতীয় মোবাইল নম্বর লিখুন।',
+    genericError: 'কিছু ভুল হয়েছে। আবার চেষ্টা করুন।',
+    sendOtp: 'OTP পাঠান',
+    sending: 'পাঠানো হচ্ছে...',
+    enterOtp: 'OTP লিখুন',
+    sentTo: 'পাঠানো হয়েছে',
+    pilotOtp: 'পাইলটের জন্য OTP ব্যবহার করুন',
+    verifying: 'যাচাই হচ্ছে...',
+    verifyEnter: 'যাচাই করে ঢুকুন',
+    differentNumber: '← অন্য নম্বর ব্যবহার করুন',
+    couldNotVerify: 'যাচাই করা যায়নি। আবার চেষ্টা করুন।',
+    otpDigit: 'OTP সংখ্যা',
+  },
+  hi: {
+    productLine: 'इलेक्ट्रिकल सुरक्षा और वायरिंग',
+    signIn: 'फोन से साइन इन',
+    mobile: 'मोबाइल नंबर',
+    invalidPhone: 'सही 10 अंकों का भारतीय मोबाइल नंबर डालें।',
+    genericError: 'कुछ गलत हुआ। फिर से कोशिश करें।',
+    sendOtp: 'OTP भेजें',
+    sending: 'भेज रहा है...',
+    enterOtp: 'OTP डालें',
+    sentTo: 'भेजा गया',
+    pilotOtp: 'पायलट के लिए OTP इस्तेमाल करें',
+    verifying: 'जांच रहा है...',
+    verifyEnter: 'जांच कर प्रवेश करें',
+    differentNumber: '← दूसरा नंबर इस्तेमाल करें',
+    couldNotVerify: 'जांच नहीं हो सकी। फिर से कोशिश करें।',
+    otpDigit: 'OTP अंक',
+  },
+  en: {
+    productLine: 'Electrical Safety & Wiring',
+    signIn: 'Sign in with phone',
+    mobile: 'Mobile number',
+    invalidPhone: 'Enter a valid 10-digit Indian mobile number.',
+    genericError: 'Something went wrong. Try again.',
+    sendOtp: 'Send OTP',
+    sending: 'Sending...',
+    enterOtp: 'Enter OTP',
+    sentTo: 'Sent to',
+    pilotOtp: 'For the pilot, use OTP',
+    verifying: 'Verifying...',
+    verifyEnter: 'Verify & enter',
+    differentNumber: '← Use a different number',
+    couldNotVerify: 'Could not verify. Try again.',
+    otpDigit: 'OTP digit',
+  },
+} as const;
+
 export default function PhoneGate({ children }: { children: React.ReactNode }) {
   const { learnerId, userPhone, setUser, clearUser, setLang, lang } = useStore();
   // `checking` is the initial session probe — until it resolves we render a
@@ -29,6 +84,7 @@ export default function PhoneGate({ children }: { children: React.ReactNode }) {
   const [otpDigits, setOtpDigits] = useState<string[]>(['', '', '', '', '', '']);
   const [err, setErr] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const c = copy[lang];
 
   const otpInputs = useRef<Array<HTMLInputElement | null>>([]);
   const phoneInputRef = useRef<HTMLInputElement>(null);
@@ -90,7 +146,7 @@ export default function PhoneGate({ children }: { children: React.ReactNode }) {
     setErr('');
     const normalized = normalizeIndianPhone(phoneInput);
     if (!normalized) {
-      setErr('Enter a valid 10-digit Indian mobile number.');
+      setErr(c.invalidPhone);
       return;
     }
     setSubmitting(true);
@@ -102,7 +158,7 @@ export default function PhoneGate({ children }: { children: React.ReactNode }) {
       // Focus the first OTP box on the next tick.
       setTimeout(() => otpInputs.current[0]?.focus(), 50);
     } catch (e) {
-      setErr(e instanceof ApiError ? e.message : 'Something went wrong. Try again.');
+      setErr(e instanceof ApiError ? e.message : c.genericError);
     } finally {
       setSubmitting(false);
     }
@@ -127,7 +183,7 @@ export default function PhoneGate({ children }: { children: React.ReactNode }) {
         setLang(me.preferredLang as Lang);
       }
     } catch (e) {
-      setErr(e instanceof ApiError ? e.message : 'Could not verify. Try again.');
+      setErr(e instanceof ApiError ? e.message : c.couldNotVerify);
       setOtpDigits(['', '', '', '', '', '']);
       setTimeout(() => otpInputs.current[0]?.focus(), 0);
     } finally {
@@ -182,20 +238,20 @@ export default function PhoneGate({ children }: { children: React.ReactNode }) {
         <div className="flex flex-col items-center mb-6">
           <Avatar size={64} useImage />
           <p className="font-mono text-[10px] tracking-[0.22em] uppercase text-gold mt-4">
-            Vajra Acharya
+            {t('appTraining', lang)}
           </p>
-          <h1 className="font-serif italic text-3xl text-ink mt-1">Vajra Acharya</h1>
-          <p className="text-xs text-muted mt-1">Electrical Safety &amp; Wiring</p>
+          <h1 className="font-serif italic text-3xl text-ink mt-1">{t('appName', lang)}</h1>
+          <p className="text-xs text-muted mt-1">{c.productLine}</p>
         </div>
 
         {step === 'phone' ? (
           <form onSubmit={submitPhone}>
             <p className="font-mono text-[10px] tracking-[0.18em] uppercase text-muted text-center mb-3">
-              Sign in with phone
+              {c.signIn}
             </p>
 
             <label className="block">
-              <span className="sr-only">Mobile number</span>
+              <span className="sr-only">{c.mobile}</span>
               <div className="flex items-stretch bg-cream border border-line rounded-xl overflow-hidden focus-within:border-forest focus-within:ring-2 focus-within:ring-forest/20">
                 <span className="px-3 flex items-center font-mono text-sm text-muted border-r border-line">
                   +91
@@ -212,7 +268,7 @@ export default function PhoneGate({ children }: { children: React.ReactNode }) {
                   onChange={(e) => setPhoneInput(e.target.value)}
                   placeholder="90628 39387"
                   className="flex-1 bg-transparent px-3 py-3 font-mono text-[15px] text-ink placeholder:text-muted focus:outline-none"
-                  aria-label="Mobile number"
+                  aria-label={c.mobile}
                 />
               </div>
             </label>
@@ -222,7 +278,7 @@ export default function PhoneGate({ children }: { children: React.ReactNode }) {
               disabled={submitting || !phoneInput.trim()}
               className="w-full mt-4 py-3 bg-forest text-cream font-semibold rounded-xl text-sm hover:bg-forest-deep disabled:opacity-50 transition-colors"
             >
-              {submitting ? 'Sending…' : 'Send OTP'}
+              {submitting ? c.sending : c.sendOtp}
             </button>
 
             {err && (
@@ -236,10 +292,10 @@ export default function PhoneGate({ children }: { children: React.ReactNode }) {
         ) : (
           <form onSubmit={submitOtp}>
             <p className="font-mono text-[10px] tracking-[0.18em] uppercase text-muted text-center mb-1">
-              Enter OTP
+              {c.enterOtp}
             </p>
             <p className="text-xs text-ink text-center mb-4">
-              Sent to <span className="font-mono">{formatIndianPhone(normalizedPhone)}</span>
+              {c.sentTo} <span className="font-mono">{formatIndianPhone(normalizedPhone)}</span>
             </p>
 
             <div className="flex justify-center gap-2 mb-3">
@@ -256,14 +312,14 @@ export default function PhoneGate({ children }: { children: React.ReactNode }) {
                   onChange={(e) => setOtpDigitAt(i, e.target.value)}
                   onKeyDown={(e) => onOtpKeyDown(i, e)}
                   onPaste={onOtpPaste}
-                  aria-label={`OTP digit ${i + 1}`}
+                  aria-label={`${c.otpDigit} ${i + 1}`}
                   className="w-11 h-12 lg:w-12 lg:h-14 bg-cream border border-line rounded-xl font-mono text-2xl text-ink text-center focus:outline-none focus:border-forest focus:ring-2 focus:ring-forest/20"
                 />
               ))}
             </div>
 
             <p className="text-[11px] text-muted text-center mb-4">
-              For the pilot, use OTP <span className="font-mono font-semibold text-forest">123456</span>
+              {c.pilotOtp} <span className="font-mono font-semibold text-forest">123456</span>
             </p>
 
             <button
@@ -271,7 +327,7 @@ export default function PhoneGate({ children }: { children: React.ReactNode }) {
               disabled={submitting || otpDigits.some((d) => !d)}
               className="w-full py-3 bg-forest text-cream font-semibold rounded-xl text-sm hover:bg-forest-deep disabled:opacity-50 transition-colors"
             >
-              {submitting ? 'Verifying…' : 'Verify & enter'}
+              {submitting ? c.verifying : c.verifyEnter}
             </button>
 
             <button
@@ -279,7 +335,7 @@ export default function PhoneGate({ children }: { children: React.ReactNode }) {
               onClick={() => { setStep('phone'); setErr(''); }}
               className="w-full mt-2 py-2 text-muted hover:text-ink text-xs"
             >
-              ← Use a different number
+              {c.differentNumber}
             </button>
 
             {err && (

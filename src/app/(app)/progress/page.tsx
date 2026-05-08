@@ -223,7 +223,9 @@ export default function ProgressPage() {
               >
                 <span className="flex items-center gap-2 text-sm font-medium">
                   <Icon name={voiceEnabled ? 'speaker' : 'speakerOff'} size={16} />
-                  {voiceEnabled ? 'On' : 'Off'}
+                  {voiceEnabled
+                    ? lang === 'bn' ? 'চালু' : lang === 'hi' ? 'चालू' : 'On'
+                    : lang === 'bn' ? 'বন্ধ' : lang === 'hi' ? 'बंद' : 'Off'}
                 </span>
                 <span
                   className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${

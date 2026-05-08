@@ -34,17 +34,41 @@ export default function HomeDashboard() {
   const avgScore = totalQuizzes > 0
     ? Math.round(quizAttempts.reduce((sum, q) => sum + (q.score / q.total) * 100, 0) / totalQuizzes)
     : 0;
-  const moduleWord = totalModules === 1 ? 'module' : 'modules';
-  const quizWord = totalQuizzes === 1 ? 'quiz' : 'quizzes';
-  const videoWord = videoCount === 1 ? 'video' : 'videos';
+  const moduleWord = lang === 'bn' ? 'মডিউল' : lang === 'hi' ? 'मॉड्यूल' : totalModules === 1 ? 'module' : 'modules';
+  const quizWord = lang === 'bn' ? 'কুইজ' : lang === 'hi' ? 'क्विज़' : totalQuizzes === 1 ? 'quiz' : 'quizzes';
+  const videoWord = lang === 'bn' ? 'ভিডিও' : lang === 'hi' ? 'वीडियो' : videoCount === 1 ? 'video' : 'videos';
   const learnDesc = totalModules > 0
-    ? `${totalModules} ${moduleWord} loaded from Supabase · read and track progress`
+    ? lang === 'bn'
+      ? `${totalModules} ${moduleWord} লোড হয়েছে · পড়ুন এবং অগ্রগতি রাখুন`
+      : lang === 'hi'
+      ? `${totalModules} ${moduleWord} लोड हुए · पढ़ें और प्रगति रखें`
+      : `${totalModules} ${moduleWord} loaded from Supabase · read and track progress`
+    : lang === 'bn'
+    ? 'মডিউল লোড হচ্ছে'
+    : lang === 'hi'
+    ? 'मॉड्यूल लोड हो रहे हैं'
     : 'Loading modules from Supabase';
   const quizDesc = totalQuizzes > 0
-    ? `${totalQuizzes} ${quizWord} taken · ${avgScore}% average score`
+    ? lang === 'bn'
+      ? `${totalQuizzes} ${quizWord} দেওয়া হয়েছে · গড় স্কোর ${avgScore}%`
+      : lang === 'hi'
+      ? `${totalQuizzes} ${quizWord} दिए गए · औसत स्कोर ${avgScore}%`
+      : `${totalQuizzes} ${quizWord} taken · ${avgScore}% average score`
+    : lang === 'bn'
+    ? `${totalModules || 'আপনার'} ${moduleWord} থেকে ৫ প্রশ্নের কুইজ তৈরি হবে`
+    : lang === 'hi'
+    ? `${totalModules || 'आपके'} ${moduleWord} से 5 सवालों का क्विज़ बनेगा`
     : `${totalModules || 'Your'} ${moduleWord} can generate 5-question quizzes`;
   const videoDesc = videoCount > 0
-    ? `${videoCount} ${videoWord} available from Supabase`
+    ? lang === 'bn'
+      ? `${videoCount} ${videoWord} আছে`
+      : lang === 'hi'
+      ? `${videoCount} ${videoWord} उपलब्ध हैं`
+      : `${videoCount} ${videoWord} available from Supabase`
+    : lang === 'bn'
+    ? 'এখনও কোনো ভিডিও যোগ করা হয়নি'
+    : lang === 'hi'
+    ? 'अभी कोई वीडियो नहीं जोड़ा गया'
     : 'No videos added yet · add links in Supabase';
 
   const greeting = lang === 'bn' ? 'নমস্কার' : lang === 'hi' ? 'नमस्कार' : 'Welcome back';
@@ -179,7 +203,13 @@ export default function HomeDashboard() {
             href="/progress"
             icon="chart"
             title={t('me', lang)}
-            desc={`${completedModules}/${totalModules || 0} ${moduleWord} completed · ${totalQuizzes} ${quizWord} · ${avgScore || 0}% avg`}
+            desc={
+              lang === 'bn'
+                ? `${completedModules}/${totalModules || 0} ${moduleWord} সম্পন্ন · ${totalQuizzes} ${quizWord} · গড় ${avgScore || 0}%`
+                : lang === 'hi'
+                ? `${completedModules}/${totalModules || 0} ${moduleWord} पूरे · ${totalQuizzes} ${quizWord} · औसत ${avgScore || 0}%`
+                : `${completedModules}/${totalModules || 0} ${moduleWord} completed · ${totalQuizzes} ${quizWord} · ${avgScore || 0}% avg`
+            }
           />
         </section>
 

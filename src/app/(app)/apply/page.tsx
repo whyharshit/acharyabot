@@ -550,7 +550,11 @@ Write all four fields in the learner's language.`;
             </p>
             <p className="font-serif text-sm text-ink mt-3 leading-relaxed">{result.summary}</p>
             <Tag tone={scoreTone} filled className="mt-3">
-              {result.score >= 7 ? 'STRONG' : result.score >= 4 ? 'OK' : 'NEEDS WORK'}
+              {result.score >= 7
+                ? lang === 'bn' ? 'ভালো' : lang === 'hi' ? 'मजबूत' : 'STRONG'
+                : result.score >= 4
+                ? lang === 'bn' ? 'ঠিক আছে' : lang === 'hi' ? 'ठीक' : 'OK'
+                : lang === 'bn' ? 'আরও কাজ দরকার' : lang === 'hi' ? 'और अभ्यास चाहिए' : 'NEEDS WORK'}
             </Tag>
           </Card>
 
@@ -560,7 +564,7 @@ Write all four fields in the learner's language.`;
               <div className="mt-2 mb-3 rounded-lg overflow-hidden border border-line">
                 <Image
                   src={firstPhoto}
-                  alt="Submitted"
+                  alt={p.photoAttached}
                   width={600}
                   height={400}
                   unoptimized
@@ -667,7 +671,7 @@ Write all four fields in the learner's language.`;
                     <div className="rounded-2xl rounded-br-sm overflow-hidden">
                       <Image
                         src={turn.photo}
-                        alt="Attached"
+                        alt={p.photoAttached}
                         width={600}
                         height={400}
                         unoptimized
@@ -729,7 +733,7 @@ Write all four fields in the learner's language.`;
               <div className="relative rounded-xl overflow-hidden border border-line bg-ink mb-2.5">
                 <Image
                   src={photo}
-                  alt="Attached"
+                  alt={p.photoAttached}
                   width={800}
                   height={600}
                   unoptimized

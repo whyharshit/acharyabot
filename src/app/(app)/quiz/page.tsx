@@ -126,7 +126,7 @@ export default function QuizPage() {
           </p>
         )}
         <p className="text-sm text-muted text-center mb-6">
-          5 multiple-choice · ~3 min
+          {lang === 'bn' ? '৫টি বহু-বিকল্প প্রশ্ন · প্রায় ৩ মিনিট' : lang === 'hi' ? '5 बहुविकल्पीय सवाल · लगभग 3 मिनट' : '5 multiple-choice · ~3 min'}
         </p>
         {error && (
           <Card tone="cream" padding="sm" className="mb-4 border-terra/30">

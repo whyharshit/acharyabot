@@ -281,7 +281,8 @@ export default function AskPage() {
           <button
             onClick={() => setVoiceOpen(true)}
             disabled={voiceState === 'thinking'}
-            aria-label="Open voice conversation"
+            aria-label={lang === 'bn' ? 'ভয়েস কথোপকথন খুলুন' : lang === 'hi' ? 'वॉइस बातचीत खोलें' : 'Open voice conversation'}
+            title={lang === 'bn' ? 'ভয়েস কথোপকথন' : lang === 'hi' ? 'वॉइस बातचीत' : 'Voice conversation'}
             className={`shrink-0 w-10 h-10 rounded-full flex items-center justify-center transition-colors ${
               'bg-cream text-ink border border-line hover:bg-sage disabled:opacity-40'
             }`}

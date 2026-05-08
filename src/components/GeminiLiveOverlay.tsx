@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useEffect, useRef, useState } from "react";
 import type { Lang } from "@/lib/types";
@@ -19,11 +19,29 @@ interface Props {
   onTurnComplete?: (turn: { userText: string; modelText: string }) => void;
 }
 
-const copy = {
-  bn: { hold: "ধরে বলো", listen: "শুনছি...", speak: "Vajra Acharya বলছে...", connect: "জোড়া লাগছে...", close: "বন্ধ" },
-  hi: { hold: "दबाकर बोलो", listen: "सुन रहा हूँ...", speak: "Vajra Acharya बोल रहा है...", connect: "जुड़ रहा है...", close: "बंद" },
-  en: { hold: "Hold to talk", listen: "Listening...", speak: "Vajra Acharya is speaking...", connect: "Connecting...", close: "Close" },
-} as const;
+const copy: Record<Lang, { hold: string; listen: string; speak: string; connect: string; close: string }> = {
+  bn: {
+    hold: "Hold to talk",
+    listen: "Listening...",
+    speak: "Vajra Acharya is speaking...",
+    connect: "Connecting...",
+    close: "Close",
+  },
+  hi: {
+    hold: "Hold to talk",
+    listen: "Listening...",
+    speak: "Vajra Acharya is speaking...",
+    connect: "Connecting...",
+    close: "Close",
+  },
+  en: {
+    hold: "Hold to talk",
+    listen: "Listening...",
+    speak: "Vajra Acharya is speaking...",
+    connect: "Connecting...",
+    close: "Close",
+  },
+};
 
 function base64ToBytes(b64: string) {
   const bin = atob(b64);
@@ -53,12 +71,34 @@ function downsampleToPcm16(input: Float32Array, inputRate: number, outputRate = 
 }
 
 function pcm24kToAudioBuffer(ctx: AudioContext, b64: string) {
-  const bytes = base64ToBytes(b64);
-  const pcm = new Int16Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength / 2));
-  const buffer = ctx.createBuffer(1, pcm.length, 24000);
-  const channel = buffer.getChannelData(0);
-  for (let i = 0; i < pcm.length; i++) channel[i] = pcm[i] / 0x8000;
-  return buffer;
+  try {
+    if (!b64 || b64.length === 0) {
+      console.warn("[GeminiLive] empty base64 audio data");
+      return ctx.createBuffer(1, 0, 24000);
+    }
+    const bytes = base64ToBytes(b64);
+    if (bytes.length === 0) {
+      console.warn("[GeminiLive] decoded audio bytes are empty");
+      return ctx.createBuffer(1, 0, 24000);
+    }
+    const sampleCount = Math.floor(bytes.byteLength / 2);
+    if (sampleCount === 0) {
+      console.warn("[GeminiLive] not enough bytes for even one sample", bytes.byteLength);
+      return ctx.createBuffer(1, 0, 24000);
+    }
+    const pcm = new Int16Array(bytes.buffer, bytes.byteOffset, sampleCount);
+    const buffer = ctx.createBuffer(1, pcm.length, 24000);
+    const channel = buffer.getChannelData(0);
+    for (let i = 0; i < pcm.length; i++) channel[i] = pcm[i] / 0x8000;
+    console.info("[GeminiLive] audio decoded successfully", {
+      sampleCount,
+      duration: (sampleCount / 24000).toFixed(2),
+    });
+    return buffer;
+  } catch (err) {
+    console.error("[GeminiLive] audio decoding failed", err);
+    return ctx.createBuffer(1, 0, 24000);
+  }
 }
 
 export default function GeminiLiveOverlay({
@@ -110,8 +150,12 @@ export default function GeminiLiveOverlay({
     setError("");
     setStatusDetail("Minting live token");
     try {
+      console.info("[GeminiLive] requesting token", { mode, moduleId, lang });
       const token = await api.ai.geminiLiveToken({ mode, moduleId, lang });
-      if (cancelled) return;
+      if (cancelled) {
+        console.info("[GeminiLive] connect cancelled");
+        return;
+      }
       setStatusDetail("Opening live socket");
       const ws = new WebSocket(token.websocketUrl);
       wsRef.current = ws;
@@ -133,21 +177,36 @@ export default function GeminiLiveOverlay({
           console.warn("[GeminiLive] message handling failed", err);
         });
       };
-      ws.onerror = (event) => {
-        console.error("[GeminiLive] socket error", event);
-        setError("Gemini Live connection failed");
+      ws.onerror = (event: Event) => {
+        console.error("[GeminiLive] socket error", event, {
+          readyState: ws.readyState,
+          url: ws.url,
+        });
+        setError("Voice connection failed. Check browser console and try again.");
         setState("error");
       };
-      ws.onclose = (event) => {
+      ws.onclose = (event: CloseEvent) => {
         clearSetupTimer();
-        console.warn("[GeminiLive] socket closed", { code: event.code, reason: event.reason, wasClean: event.wasClean });
+        const code = event.code;
+        const reason = event.reason || "no reason";
+        console.warn("[GeminiLive] socket closed", { code, reason, wasClean: event.wasClean });
         if (!cancelled && state === "connecting") {
-          setError(`Gemini Live socket closed before setup (${event.code || "no code"})`);
+          let msg = `Voice connection closed (${code})`;
+          if (code === 1002) msg = "Protocol error in voice session";
+          if (code === 1008) msg = "Invalid message format";
+          if (code === 1011) msg = "Server error in voice session";
+          setError(msg);
           setState("error");
         }
       };
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : err instanceof Error ? err.message : "Could not start voice session");
+      setError(
+        err instanceof ApiError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : "Could not start voice session",
+      );
       setState("error");
     }
   }
@@ -186,11 +245,18 @@ export default function GeminiLiveOverlay({
         modelTurn?: { parts?: Array<{ inlineData?: { data?: string } }> };
       };
     };
-    try { msg = JSON.parse(raw); } catch {
-      console.warn("[GeminiLive] non-json message", raw.slice(0, 160));
+    try {
+      msg = JSON.parse(raw);
+    } catch {
+      const sample = typeof raw === "string" ? raw.slice(0, 160) : String(raw).slice(0, 160);
+      console.warn("[GeminiLive] non-json message", sample);
       return;
     }
-    console.info("[GeminiLive] message", msg);
+    const isSetup = !!msg.setupComplete;
+    const hasServerContent = !!msg.serverContent;
+    if (isSetup || hasServerContent || recordingRef.current) {
+      console.info("[GeminiLive] message received", { isSetup, hasServerContent });
+    }
     if ("setupComplete" in msg) {
       clearSetupTimer();
       setStatusDetail("");
@@ -216,7 +282,10 @@ export default function GeminiLiveOverlay({
     const parts = sc.modelTurn?.parts || [];
     for (const part of parts) {
       const data = part.inlineData?.data;
-      if (data) enqueueAudio(data);
+      if (data && typeof data === "string" && data.length > 0) {
+        console.info("[GeminiLive] enqueueing audio chunk", data.length);
+        enqueueAudio(data);
+      }
     }
     if (sc.turnComplete) {
       const userText = inputTextRef.current.trim();
@@ -240,23 +309,44 @@ export default function GeminiLiveOverlay({
   }
 
   function enqueueAudio(b64: string) {
-    const ctx = audioCtxRef.current || new AudioContext();
-    audioCtxRef.current = ctx;
-    audioQueueLen.current++;
-    setState("speaking");
-    playingRef.current = playingRef.current.then(() => new Promise<void>((resolve) => {
-      const source = ctx.createBufferSource();
-      activeSourcesRef.current.add(source);
-      source.buffer = pcm24kToAudioBuffer(ctx, b64);
-      source.connect(ctx.destination);
-      source.onended = () => {
-        activeSourcesRef.current.delete(source);
-        audioQueueLen.current--;
-        if (audioQueueLen.current <= 0 && !recordingRef.current) setState("idle");
-        resolve();
-      };
-      source.start();
-    })).catch(() => undefined);
+    try {
+      if (!b64 || typeof b64 !== "string") return;
+      const ctx = audioCtxRef.current || new AudioContext();
+      audioCtxRef.current = ctx;
+      audioQueueLen.current++;
+      setState("speaking");
+      playingRef.current = playingRef.current
+        .then(() => new Promise<void>((resolve) => {
+          try {
+            const buffer = pcm24kToAudioBuffer(ctx, b64);
+            if (!buffer || buffer.length === 0) {
+              audioQueueLen.current--;
+              resolve();
+              return;
+            }
+            const source = ctx.createBufferSource();
+            activeSourcesRef.current.add(source);
+            source.buffer = buffer;
+            source.connect(ctx.destination);
+            source.onended = () => {
+              activeSourcesRef.current.delete(source);
+              audioQueueLen.current--;
+              if (audioQueueLen.current <= 0 && !recordingRef.current) setState("idle");
+              resolve();
+            };
+            source.start();
+          } catch (err) {
+            console.error("[GeminiLive] audio playback error", err);
+            audioQueueLen.current--;
+            resolve();
+          }
+        }))
+        .catch((err) => {
+          console.error("[GeminiLive] audio queue error", err);
+        });
+    } catch (err) {
+      console.error("[GeminiLive] enqueueAudio failed", err);
+    }
   }
 
   async function startRecording() {
@@ -270,26 +360,58 @@ export default function GeminiLiveOverlay({
     outputTextRef.current = "";
     recordingRef.current = true;
     setState("recording");
-    const ctx = audioCtxRef.current || new AudioContext();
-    audioCtxRef.current = ctx;
-    await ctx.resume();
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    mediaStreamRef.current = stream;
-    const source = ctx.createMediaStreamSource(stream);
-    const processor = ctx.createScriptProcessor(4096, 1, 1);
-    sourceRef.current = source;
-    processorRef.current = processor;
-    processor.onaudioprocess = (ev) => {
-      if (!recordingRef.current || wsRef.current?.readyState !== WebSocket.OPEN) return;
-      const pcm = downsampleToPcm16(ev.inputBuffer.getChannelData(0), ctx.sampleRate);
-      wsRef.current.send(JSON.stringify({
-        realtimeInput: {
-          audio: { data: bytesToBase64(pcm), mimeType: "audio/pcm;rate=16000" },
-        },
-      }));
-    };
-    source.connect(processor);
-    processor.connect(ctx.destination);
+    try {
+      const ctx = audioCtxRef.current || new AudioContext();
+      audioCtxRef.current = ctx;
+      await ctx.resume();
+
+      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+        setError("Voice session not connected. Please close and open voice again.");
+        recordingRef.current = false;
+        setState("error");
+        return;
+      }
+
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (micErr: unknown) {
+        const err = micErr as DOMException;
+        let msg = "Microphone access denied";
+        if (err.name === "NotAllowedError") msg = "Please allow microphone access in your browser settings";
+        else if (err.name === "NotFoundError") msg = "No microphone found on this device";
+        else if (err.name === "NotReadableError") msg = "Microphone is already in use by another app";
+        console.error("[GeminiLive] getUserMedia failed:", err.name, err.message);
+        setError(msg);
+        recordingRef.current = false;
+        setState("error");
+        return;
+      }
+
+      mediaStreamRef.current = stream;
+      const source = ctx.createMediaStreamSource(stream);
+      const processor = ctx.createScriptProcessor(4096, 1, 1);
+      sourceRef.current = source;
+      processorRef.current = processor;
+      processor.onaudioprocess = (ev) => {
+        if (!recordingRef.current || wsRef.current?.readyState !== WebSocket.OPEN) return;
+        const pcm = downsampleToPcm16(ev.inputBuffer.getChannelData(0), ctx.sampleRate);
+        if (pcm.length === 0) return;
+        wsRef.current.send(JSON.stringify({
+          realtimeInput: {
+            audio: { data: bytesToBase64(pcm), mimeType: "audio/pcm;rate=16000" },
+          },
+        }));
+      };
+      source.connect(processor);
+      processor.connect(ctx.destination);
+      console.info("[GeminiLive] recording started");
+    } catch (err) {
+      console.error("[GeminiLive] startRecording failed:", err);
+      setError(err instanceof Error ? err.message : "Failed to start recording");
+      recordingRef.current = false;
+      setState("error");
+    }
   }
 
   function stopRecording() {
@@ -364,8 +486,3 @@ export default function GeminiLiveOverlay({
     </div>
   );
 }
-
-
-
-
-

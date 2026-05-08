@@ -1,4 +1,4 @@
-﻿import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { ARJUN_SYSTEM_PROMPT } from "@/lib/system-prompt";
 import { getLearnerSession } from "@/lib/server/phone-auth";
 import { rateLimit, rateLimitKey } from "@/lib/rate-limit";
@@ -6,7 +6,7 @@ import { rateLimit, rateLimitKey } from "@/lib/rate-limit";
 export const runtime = "nodejs";
 export const preferredRegion = "bom1";
 
-const LIVE_MODEL = process.env.GEMINI_LIVE_MODEL || "gemini-2.5-flash-preview-native-audio-dialog";
+const LIVE_MODEL = process.env.GEMINI_LIVE_MODEL || "gemini-3.1-flash-live-preview";
 
 function modeInstruction(mode: string, moduleId: string | null, lang: string) {
   const langLine = lang === "bn"
@@ -56,16 +56,16 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid lang" }, { status: 400 });
   }
 
-  const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    return NextResponse.json({ error: "Gemini API key is not configured" }, { status: 500 });
+    return NextResponse.json({ error: "Gemini Live is not configured" }, { status: 500 });
   }
 
   const systemInstruction = `${ARJUN_SYSTEM_PROMPT}\n\n${modeInstruction(mode, moduleId, lang)}`;
   const now = Date.now();
   const nowUtc = new Date(now).toISOString();
   const expire_time = new Date(now + 30 * 60 * 1000).toISOString();
-  const new_session_expire_time = new Date(now + 2 * 60 * 1000).toISOString();
+  const new_session_expire_time = new Date(now + 10 * 60 * 1000).toISOString();
   const tokenRequest = {
     uses: 1,
     expire_time,
@@ -86,11 +86,15 @@ export async function POST(req: NextRequest) {
   };
 
   try {
-    console.log("gemini live token request:", JSON.stringify({
+    console.log("[gemini-live] token request:", {
       nowUtc,
-      secondsUntilNewSessionExpire: Math.round((Date.parse(new_session_expire_time) - now) / 1000),
-      tokenRequest,
-    }, null, 2));
+      mode,
+      moduleId,
+      lang,
+      model: LIVE_MODEL,
+      systemInstructionLength: systemInstruction.length,
+      apiKeyLength: apiKey.length,
+    });
     const tokenRes = await fetch("https://generativelanguage.googleapis.com/v1alpha/auth_tokens", {
       method: "POST",
       headers: {
@@ -106,18 +110,42 @@ export async function POST(req: NextRequest) {
     } catch {
       token = {};
     }
-    if (!tokenRes.ok || !token.name) {
-      console.error("gemini live token error - FULL RESPONSE:", {
+    if (!tokenRes.ok) {
+      const isApiKeyError = tokenRes.status === 401 || tokenRes.status === 403;
+      let errorMsg = "Gemini Live token failed";
+      if (isApiKeyError) errorMsg += ": Invalid API key";
+      else if (tokenRes.status === 400) errorMsg += ": Invalid request";
+      else if (tokenRes.status === 500) errorMsg += ": Google server error";
+      else errorMsg += `: HTTP ${tokenRes.status}`;
+
+      console.error("[gemini-live] token endpoint error:", {
         status: tokenRes.status,
         statusText: tokenRes.statusText,
         model: LIVE_MODEL,
-        body: rawTokenBody,
-        requestBody: tokenRequest,
+        apiKeyProvided: !!apiKey,
+        bodyPreview: rawTokenBody.slice(0, 300),
       });
       return NextResponse.json(
         {
-          error: "Could not create Gemini Live token",
-          detail: process.env.NODE_ENV === "development" ? rawTokenBody : undefined,
+          error: errorMsg,
+          detail:
+            process.env.NODE_ENV === "development"
+              ? { status: tokenRes.status, body: rawTokenBody.slice(0, 500) }
+              : undefined,
+        },
+        { status: 502 },
+      );
+    }
+
+    if (!token.name) {
+      console.error("[gemini-live] token name missing from response:", {
+        hasResponseObject: !!token,
+        bodyPreview: rawTokenBody.slice(0, 300),
+      });
+      return NextResponse.json(
+        {
+          error: "Gemini Live token response invalid",
+          detail: process.env.NODE_ENV === "development" ? rawTokenBody.slice(0, 500) : undefined,
         },
         { status: 502 },
       );
@@ -135,8 +163,23 @@ export async function POST(req: NextRequest) {
       },
     });
   } catch (err) {
-    console.error("gemini live token error:", err);
-    return NextResponse.json({ error: "Could not create Gemini Live token" }, { status: 502 });
+    console.error("[gemini-live] token request crashed:", {
+      error: err instanceof Error ? err.message : String(err),
+      apiKeyProvided: !!apiKey,
+      nodeEnv: process.env.NODE_ENV,
+    });
+    return NextResponse.json(
+      {
+        error: "Voice session setup failed",
+        detail:
+          process.env.NODE_ENV === "development"
+            ? err instanceof Error
+              ? err.message
+              : String(err)
+            : undefined,
+      },
+      { status: 502 },
+    );
   }
 }
 
