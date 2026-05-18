@@ -3,17 +3,15 @@
 import { useEffect, useRef, useState } from 'react';
 import { Avatar } from '@/components/ui/Avatar';
 import { api, ApiError } from '@/lib/api-client';
+import type { PhoneLearner } from '@/lib/api-client';
 import { t } from '@/lib/i18n/labels';
 import { useStore } from '@/lib/store';
 import { formatIndianPhone, normalizeIndianPhone } from '@/lib/phone';
 import type { Lang } from '@/lib/types';
 
 /**
- * Two-step phone + OTP gate. Replaces the old PIN gate.
- *
- * Pilot mode: the OTP is always 123456 and is shown as a hint on the OTP
- * screen. For Harshit's demo, the server creates a learner row for any valid
- * Indian phone number.
+ * Two-step phone + OTP gate. The server generates an OTP, stores only its hash,
+ * and sets the Vajra Acharya session cookie after verification.
  */
 
 type Step = 'phone' | 'otp';
@@ -29,7 +27,8 @@ const copy = {
     sending: 'পাঠানো হচ্ছে...',
     enterOtp: 'OTP লিখুন',
     sentTo: 'পাঠানো হয়েছে',
-    pilotOtp: 'পাইলটের জন্য OTP ব্যবহার করুন',
+    pilotOtp: 'ডেভ টেস্ট OTP',
+    otpValidity: 'OTP ১০ মিনিটের জন্য বৈধ।',
     verifying: 'যাচাই হচ্ছে...',
     verifyEnter: 'যাচাই করে ঢুকুন',
     differentNumber: '← অন্য নম্বর ব্যবহার করুন',
@@ -46,7 +45,8 @@ const copy = {
     sending: 'भेज रहा है...',
     enterOtp: 'OTP डालें',
     sentTo: 'भेजा गया',
-    pilotOtp: 'पायलट के लिए OTP इस्तेमाल करें',
+    pilotOtp: 'डेव टेस्ट OTP',
+    otpValidity: 'OTP 10 मिनट तक मान्य है।',
     verifying: 'जांच रहा है...',
     verifyEnter: 'जांच कर प्रवेश करें',
     differentNumber: '← दूसरा नंबर इस्तेमाल करें',
@@ -63,7 +63,8 @@ const copy = {
     sending: 'Sending...',
     enterOtp: 'Enter OTP',
     sentTo: 'Sent to',
-    pilotOtp: 'For the pilot, use OTP',
+    pilotOtp: 'Dev test OTP',
+    otpValidity: 'OTP is valid for 10 minutes.',
     verifying: 'Verifying...',
     verifyEnter: 'Verify & enter',
     differentNumber: '← Use a different number',
@@ -82,6 +83,7 @@ export default function PhoneGate({ children }: { children: React.ReactNode }) {
   const [phoneInput, setPhoneInput] = useState('');
   const [normalizedPhone, setNormalizedPhone] = useState<string>('');
   const [otpDigits, setOtpDigits] = useState<string[]>(['', '', '', '', '', '']);
+  const [devOtp, setDevOtp] = useState<string | null>(null);
   const [err, setErr] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const c = copy[lang];
@@ -109,7 +111,7 @@ export default function PhoneGate({ children }: { children: React.ReactNode }) {
             learnerId: me.id,
             phone: me.phone,
             name: me.name,
-            role: me.role,
+            role: me.role === 'learner' ? 'user' : me.role,
             isAdmin: me.isAdmin,
           });
           if (me.preferredLang && ['bn', 'hi', 'en'].includes(me.preferredLang)) {
@@ -141,6 +143,19 @@ export default function PhoneGate({ children }: { children: React.ReactNode }) {
 
   if (learnerId && userPhone) return <>{children}</>;
 
+  function storeUser(me: PhoneLearner) {
+    setUser({
+      learnerId: me.id,
+      phone: me.phone,
+      name: me.name,
+      role: me.role === 'learner' ? 'user' : me.role,
+      isAdmin: me.isAdmin,
+    });
+    if (me.preferredLang && ['bn', 'hi', 'en'].includes(me.preferredLang)) {
+      setLang(me.preferredLang as Lang);
+    }
+  }
+
   async function submitPhone(e: React.FormEvent) {
     e.preventDefault();
     setErr('');
@@ -151,8 +166,9 @@ export default function PhoneGate({ children }: { children: React.ReactNode }) {
     }
     setSubmitting(true);
     try {
-      await api.phoneAuth.requestOtp(normalized);
+      const result = await api.phoneAuth.requestOtp(normalized);
       setNormalizedPhone(normalized);
+      setDevOtp(result.devOtp || null);
       setStep('otp');
       setOtpDigits(['', '', '', '', '', '']);
       // Focus the first OTP box on the next tick.
@@ -172,16 +188,7 @@ export default function PhoneGate({ children }: { children: React.ReactNode }) {
     setErr('');
     try {
       const me = await api.phoneAuth.verifyOtp(normalizedPhone, otp);
-      setUser({
-        learnerId: me.id,
-        phone: me.phone,
-        name: me.name,
-        role: me.role,
-        isAdmin: me.isAdmin,
-      });
-      if (me.preferredLang && ['bn', 'hi', 'en'].includes(me.preferredLang)) {
-        setLang(me.preferredLang as Lang);
-      }
+      storeUser(me);
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : c.couldNotVerify);
       setOtpDigits(['', '', '', '', '', '']);
@@ -318,9 +325,15 @@ export default function PhoneGate({ children }: { children: React.ReactNode }) {
               ))}
             </div>
 
-            <p className="text-[11px] text-muted text-center mb-4">
-              {c.pilotOtp} <span className="font-mono font-semibold text-forest">123456</span>
-            </p>
+            {devOtp ? (
+              <p className="text-[11px] text-muted text-center mb-4">
+                {c.pilotOtp} <span className="font-mono font-semibold text-forest">{devOtp}</span>
+              </p>
+            ) : (
+              <p className="text-[11px] text-muted text-center mb-4">
+                {c.otpValidity}
+              </p>
+            )}
 
             <button
               type="submit"
@@ -332,7 +345,7 @@ export default function PhoneGate({ children }: { children: React.ReactNode }) {
 
             <button
               type="button"
-              onClick={() => { setStep('phone'); setErr(''); }}
+              onClick={() => { setStep('phone'); setErr(''); setDevOtp(null); }}
               className="w-full mt-2 py-2 text-muted hover:text-ink text-xs"
             >
               {c.differentNumber}
@@ -347,5 +360,3 @@ export default function PhoneGate({ children }: { children: React.ReactNode }) {
     </div>
   );
 }
-
-

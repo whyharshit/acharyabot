@@ -2,6 +2,8 @@
 import { dbGunakul, dbConfigured } from "@/lib/server/supabase";
 import { rateLimit, rateLimitKey } from "@/lib/rate-limit";
 import { normalizeIndianPhone } from "@/lib/phone";
+import { createOtp, hashOtp, otpExpiry, OTP_TTL_MINUTES } from "@/lib/server/otp";
+import { sendOtpSms, smsConfigured } from "@/lib/server/sms";
 
 export const runtime = "nodejs";
 export const preferredRegion = "bom1";
@@ -27,6 +29,9 @@ export async function POST(req: NextRequest) {
       { status: 400 }
     );
   }
+  if (process.env.NODE_ENV === "production" && !smsConfigured()) {
+    return NextResponse.json({ error: "SMS provider not configured." }, { status: 500 });
+  }
 
   const { error } = await dbGunakul
     .from("learners")
@@ -40,7 +45,29 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Service error. Try again shortly." }, { status: 502 });
   }
 
-  return NextResponse.json({ ok: true, phone });
+  const otp = createOtp();
+  const { error: otpError } = await dbGunakul.from("phone_otps").insert({
+    phone,
+    otp_hash: hashOtp(phone, otp),
+    expires_at: otpExpiry(),
+  });
+
+  if (otpError) {
+    console.error("otp-request insert error:", otpError);
+    return NextResponse.json({ error: "OTP service is not configured." }, { status: 502 });
+  }
+
+  try {
+    const sms = await sendOtpSms(phone, otp);
+    return NextResponse.json({
+      ok: true,
+      phone,
+      expiresInMinutes: OTP_TTL_MINUTES,
+      smsSent: sms.sent,
+      devOtp: !smsConfigured() && process.env.NODE_ENV !== "production" ? otp : undefined,
+    });
+  } catch (err) {
+    console.error("otp SMS send error:", err);
+    return NextResponse.json({ error: "Could not send OTP. Try again shortly." }, { status: 502 });
+  }
 }
-
-

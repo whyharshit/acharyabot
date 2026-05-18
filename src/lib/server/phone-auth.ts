@@ -10,9 +10,6 @@ const SESSION_SECRET =
   process.env.SESSION_SECRET ||
   "vajra-acharya-dev-secret-change-me"; // prod MUST override
 
-// OTP for the pilot: always 123456.
-export const DEV_OTP = "123456";
-
 export interface LearnerSession {
   learnerId: string;
   phone: string;
@@ -82,5 +79,4 @@ export function clearLearnerCookie(res: NextResponse) {
 }
 
 export { COOKIE_NAME as LEARNER_COOKIE_NAME };
-
 

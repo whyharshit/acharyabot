@@ -454,14 +454,14 @@ export interface PhoneLearner {
   id: string;
   phone: string;
   name: string;
-  role: "user" | "admin" | "founder";
+  role: "learner" | "user" | "admin" | "founder";
   isAdmin: boolean;
   preferredLang?: string;
 }
 
 const phoneAuth = {
-  requestOtp: async (phone: string): Promise<{ phone: string }> => {
-    return await request<{ ok: true; phone: string }>(
+  requestOtp: async (phone: string): Promise<{ phone: string; devOtp?: string; smsSent?: boolean; expiresInMinutes?: number }> => {
+    return await request<{ ok: true; phone: string; devOtp?: string; smsSent?: boolean; expiresInMinutes?: number }>(
       "/api/auth/phone/request-otp",
       { json: { phone } }
     );
@@ -483,5 +483,3 @@ const phoneAuth = {
 };
 
 export const api = { content, learner, ai, auth, admin, phoneAuth };
-
-
