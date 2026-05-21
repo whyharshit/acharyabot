@@ -190,6 +190,26 @@ function phoneKeyboard() {
   ]).oneTime().resize();
 }
 
+function askKeyboard() {
+  return Markup.keyboard([
+    ["Cancel Ask"]
+  ]).resize();
+}
+
+async function sendDefaultMessage(ctx: BotContext, acharya: AcharyaSlug, lang: Lang) {
+  const acharyaName = ACHARYA_NAMES[acharya];
+  const askBtnLabel = `Ask ${acharyaName}`;
+  let text = "";
+  if (lang === "hi") {
+    text = `कृपया मेनू से एक विकल्प चुनें।\n\nप्रश्न पूछने के लिए <b>"${askBtnLabel}"</b> पर क्लिक करें, या अपनी प्रगति रिपोर्ट दर्ज करने के लिए <b>"Field Apply"</b> चुनें।`;
+  } else if (lang === "bn") {
+    text = `দয়া করে মেনু থেকে একটি বিকল্প নির্বাচন করুন।\n\nপ্রশ্ন জিজ্ঞাসা করতে <b>"${askBtnLabel}"</b> এ ক্লিক করুন, অথবা আপনার অগ্রগতি প্রতিবেদন জমা দিতে <b>"Field Apply"</b> নির্বাচন করুন।`;
+  } else {
+    text = `Please select an option from the menu.\n\nClick <b>"${askBtnLabel}"</b> to ask a question, or select <b>"Field Apply"</b> to submit a progress report.`;
+  }
+  await ctx.reply(text, { parse_mode: "HTML", ...mainMenuKeyboard(acharya) });
+}
+
 // ── Acharya Selection / Authentication ───────────────────────────────────────
 
 async function promptAuthentication(ctx: BotContext) {
@@ -571,10 +591,10 @@ async function answerTextQuestion(ctx: BotContext, acharya: AcharyaSlug, learner
     const result = await model.generateContent(prompt);
     const answer = result.response.text();
     await logChat(acharya, learner.id, lang, text, answer, Date.now() - started);
-    await ctx.reply(answer);
+    await ctx.reply(answer, mainMenuKeyboard(acharya));
   } catch (err) {
     console.error("Gemini AI error:", err);
-    await ctx.reply("I could not answer that right now. Please try again.");
+    await ctx.reply("I could not answer that right now. Please try again.", mainMenuKeyboard(acharya));
   } finally {
     if (tempMsg && ctx.chat?.id) {
       try {
@@ -624,9 +644,9 @@ async function analyzeImage(ctx: BotContext, acharya: AcharyaSlug, learner: Tele
     ]);
     const answer = result.response.text().trim();
     await logChat(acharya, learner.id, lang, `[image: ${mimeType}]`, answer, Date.now() - started);
-    await ctx.reply(answer || "I analyzed the image but got no useful response. Please try a clearer photo.");
+    await ctx.reply(answer || "I analyzed the image but got no useful response. Please try a clearer photo.", mainMenuKeyboard(acharya));
   } catch {
-    await ctx.reply("I could not analyze that image. Please send a clear, well-lit photo.");
+    await ctx.reply("I could not analyze that image. Please send a clear, well-lit photo.", mainMenuKeyboard(acharya));
   }
 }
 
@@ -638,7 +658,10 @@ async function startApply(ctx: BotContext, acharya: AcharyaSlug, learner: Telegr
   const lang = await getLang(ctx.from.id);
   await patchBotState(ctx.from.id, { apply: { turns: [], moduleId } });
   await ctx.reply(
-    `Field Apply started${mod ? ` for ${titleOf(mod, lang)}` : ""}.\n\nSend text, voice, or a photo. When finished, type: Submit Progress`,
+    `Field Apply started${mod ? ` for ${titleOf(mod, lang)}` : ""}.\n\nSend text, voice, or a photo. When finished, select Submit Progress or Cancel Apply.`,
+    Markup.keyboard([
+      ["Submit Progress", "Cancel Apply"]
+    ]).resize()
   );
 }
 
@@ -647,15 +670,29 @@ async function handleApplyText(ctx: BotContext, acharya: AcharyaSlug, learner: T
   const state = (await getBotState(ctx.from.id)).apply;
   if (!state) return false;
 
-  if (/^(submit progress|submit|finish)$/i.test(text.trim())) {
+  const trimmed = text.trim();
+  if (/^(submit progress|submit|finish)$/i.test(trimmed)) {
     await submitApply(ctx, acharya, learner, state);
     await patchBotState(ctx.from.id, { apply: undefined });
+    await sendHome(ctx, acharya, learner);
+    return true;
+  }
+
+  if (/^(cancel apply|cancel)$/i.test(trimmed)) {
+    await patchBotState(ctx.from.id, { apply: undefined });
+    await ctx.reply("Field Apply cancelled.", Markup.removeKeyboard());
+    await sendHome(ctx, acharya, learner);
     return true;
   }
 
   state.turns.push({ text: text.slice(0, 1000) });
   await patchBotState(ctx.from.id, { apply: state });
-  await ctx.reply("Added to your report. Send more details/photo/voice, or type: Submit Progress");
+  await ctx.reply(
+    "Added to your report. Send next text/photo/voice, or select Submit Progress / Cancel Apply",
+    Markup.keyboard([
+      ["Submit Progress", "Cancel Apply"]
+    ]).resize()
+  );
   return true;
 }
 
@@ -694,7 +731,12 @@ async function addApplyPhoto(ctx: BotContext, acharya: AcharyaSlug, learner: Tel
 
   state.turns.push({ text: photoDescription.slice(0, 1500), hasPhoto: true });
   await patchBotState(ctx.from.id, { apply: state });
-  await ctx.reply("Photo added to your report. Send more details, or type: Submit Progress");
+  await ctx.reply(
+    "Photo added to your report. Send next text/photo/voice, or select Submit Progress / Cancel Apply",
+    Markup.keyboard([
+      ["Submit Progress", "Cancel Apply"]
+    ]).resize()
+  );
   return true;
 }
 
@@ -933,6 +975,25 @@ async function transcribeVoice(ctx: BotContext): Promise<string | null> {
 // ── Telegraf Bot Setup ──────────────────────────────────────────────────────
 
 if (bot) {
+  // Navigation reset middleware
+  bot.use(async (ctx, next) => {
+    const text = (ctx.message as any)?.text?.trim();
+    const fromId = ctx.from?.id;
+    if (fromId && text) {
+      const menuTexts = [
+        "Home", "Learn Modules", "Videos", "Quiz", "Field Apply", "My Progress", "Farm Tools", "Open Website", "Language", "Change Acharya", "Logout",
+        "Ask Farmer Acharya", "Ask Vajra Acharya", "Ask Taksha Acharya"
+      ];
+      if (menuTexts.includes(text)) {
+        const state = await getBotState(fromId);
+        if (state.apply || state.ask || state.tool || state.quiz) {
+          await patchBotState(fromId, { apply: undefined, ask: undefined, tool: undefined, quiz: undefined });
+        }
+      }
+    }
+    return next();
+  });
+
   bot.start(async (ctx) => {
     const fromId = ctx.from?.id;
     if (!fromId) return;
@@ -1113,17 +1174,26 @@ if (bot) {
 
   bot.hears("Ask Farmer Acharya", async (ctx) => {
     const result = await requireLearner(ctx);
-    if (result) await ctx.reply("Ask me by typing a question, recording a voice message, or sending a photo.");
+    if (result && ctx.from?.id) {
+      await patchBotState(ctx.from.id, { ask: true });
+      await ctx.reply("Ask me by typing a question, recording a voice message, or sending a photo.", askKeyboard());
+    }
   });
 
   bot.hears("Ask Vajra Acharya", async (ctx) => {
     const result = await requireLearner(ctx);
-    if (result) await ctx.reply("Ask me by typing a question, recording a voice message, or sending a photo.");
+    if (result && ctx.from?.id) {
+      await patchBotState(ctx.from.id, { ask: true });
+      await ctx.reply("Ask me by typing a question, recording a voice message, or sending a photo.", askKeyboard());
+    }
   });
 
   bot.hears("Ask Taksha Acharya", async (ctx) => {
     const result = await requireLearner(ctx);
-    if (result) await ctx.reply("Ask me by typing a question, recording a voice message, or sending a photo.");
+    if (result && ctx.from?.id) {
+      await patchBotState(ctx.from.id, { ask: true });
+      await ctx.reply("Ask me by typing a question, recording a voice message, or sending a photo.", askKeyboard());
+    }
   });
 
   bot.hears("Farm Tools", async (ctx) => {
@@ -1230,74 +1300,138 @@ if (bot) {
   bot.on("voice", async (ctx) => {
     const result = await requireLearner(ctx);
     if (!result || !ctx.from?.id) return;
+
+    const session = await getSessionForUser(ctx.from.id);
+    const state = session.state_json || {};
+
+    const isApply = !!state.apply;
+    const isAsk = !!state.ask;
+
+    if (!isApply && !isAsk) {
+      await sendDefaultMessage(ctx, result.acharya, session.preferred_lang || "en");
+      return;
+    }
+
     try {
       await ctx.sendChatAction("typing");
       const transcript = await transcribeVoice(ctx);
-      if (!transcript) { await ctx.reply("I could not understand that voice message. Please try again or type your question."); return; }
+      if (!transcript) { await ctx.reply("I could not understand that voice message. Please try again."); return; }
 
-      const applyState = (await getBotState(ctx.from.id)).apply;
-      if (applyState) {
+      if (isApply) {
+        const applyState = state.apply!;
         applyState.turns.push({ text: transcript });
         await patchBotState(ctx.from.id, { apply: applyState });
-        await ctx.reply(`Added voice note: "${transcript}"\n\nSend more details/photo, or type: Submit Progress`);
+        await ctx.reply(
+          `Added voice note: "${transcript}"\n\nSend next text/photo/voice, or select Submit Progress / Cancel Apply`,
+          Markup.keyboard([
+            ["Submit Progress", "Cancel Apply"]
+          ]).resize()
+        );
         return;
       }
 
-      if (!model) { await ctx.reply("My AI brain is offline."); return; }
+      if (isAsk) {
+        if (!model) { await ctx.reply("My AI brain is offline."); return; }
 
-      const started = Date.now();
-      const lang = await getLang(ctx.from.id);
+        const started = Date.now();
+        const lang = session.preferred_lang || "en";
 
-      const waitMessageText =
-        lang === "hi" ? "मैं सोच रहा हूँ... कृपया प्रतीक्षा करें।" :
-        lang === "bn" ? "আমি ভাবছি... দয়া করে অপেক্ষা করুন।" :
-        "Thinking... Please wait, I am preparing your answer.";
-      let tempMsg: any = null;
+        const waitMessageText =
+          lang === "hi" ? "मैं सोच रहा हूँ... कृपया प्रतीक्षा करें।" :
+          lang === "bn" ? "আমি ভাবছি... দয়া করে অপেক্ষা করুন।" :
+          "Thinking... Please wait, I am preparing your answer.";
+        let tempMsg: any = null;
 
-      try {
-        tempMsg = await ctx.reply(waitMessageText);
-        const systemPrompt = getSystemPrompt(result.acharya);
-        const prompt = `${systemPrompt}\n\nAnswer this transcribed voice message in under 150 words. Preferred language: ${lang}.\nMessage: ${transcript}`;
-        const answer = (await model.generateContent(prompt)).response.text();
-        await logChat(result.acharya, result.learner.id, lang, `[voice] ${transcript}`, answer, Date.now() - started);
-        await ctx.reply(answer);
-      } finally {
-        if (tempMsg && ctx.chat?.id) {
-          try {
-            await ctx.telegram.deleteMessage(ctx.chat.id, tempMsg.message_id);
-          } catch (err) {
-            console.error("Failed to delete temp message", err);
+        try {
+          tempMsg = await ctx.reply(waitMessageText);
+          const systemPrompt = getSystemPrompt(result.acharya);
+          const prompt = `${systemPrompt}\n\nAnswer this transcribed voice message in under 150 words. Preferred language: ${lang}.\nMessage: ${transcript}`;
+          const answer = (await model.generateContent(prompt)).response.text();
+          await logChat(result.acharya, result.learner.id, lang, `[voice] ${transcript}`, answer, Date.now() - started);
+          await ctx.reply(answer, mainMenuKeyboard(result.acharya));
+        } finally {
+          await patchBotState(ctx.from.id, { ask: undefined });
+          if (tempMsg && ctx.chat?.id) {
+            try {
+              await ctx.telegram.deleteMessage(ctx.chat.id, tempMsg.message_id);
+            } catch (err) {
+              console.error("Failed to delete temp message", err);
+            }
           }
         }
       }
     } catch (err) {
       console.error("Voice handler error:", err);
-      await ctx.reply("I could not process that voice message. Please try typing your question instead.");
+      await ctx.reply("I could not process that voice message. Please try typing your question instead.", mainMenuKeyboard(result.acharya));
     }
   });
 
   // Photo messages (BUG-05: updated addApplyPhoto signature)
   bot.on("photo", async (ctx) => {
     const result = await requireLearner(ctx);
-    if (!result) return;
-    if (await addApplyPhoto(ctx, result.acharya, result.learner)) return;
-    const photo = ctx.message?.photo?.[(ctx.message.photo.length || 1) - 1];
-    if (!photo) { await ctx.reply("Please send a clear photo."); return; }
-    await analyzeImage(ctx, result.acharya, result.learner, photo.file_id);
+    if (!result || !ctx.from?.id) return;
+
+    const session = await getSessionForUser(ctx.from.id);
+    const state = session.state_json || {};
+
+    const isApply = !!state.apply;
+    const isAsk = !!state.ask;
+
+    if (!isApply && !isAsk) {
+      await sendDefaultMessage(ctx, result.acharya, session.preferred_lang || "en");
+      return;
+    }
+
+    if (isApply) {
+      await addApplyPhoto(ctx, result.acharya, result.learner);
+      return;
+    }
+
+    if (isAsk) {
+      const photo = ctx.message?.photo?.[(ctx.message.photo.length || 1) - 1];
+      if (!photo) { await ctx.reply("Please send a clear photo.", mainMenuKeyboard(result.acharya)); return; }
+      try {
+        await analyzeImage(ctx, result.acharya, result.learner, photo.file_id);
+      } finally {
+        await patchBotState(ctx.from.id, { ask: undefined });
+      }
+    }
   });
 
   // Document messages (BUG-05: updated addApplyPhoto signature)
   bot.on("document", async (ctx) => {
     const result = await requireLearner(ctx);
-    if (!result) return;
-    if (await addApplyPhoto(ctx, result.acharya, result.learner)) return;
-    const doc = ctx.message?.document;
-    const mimeType = doc?.mime_type || mimeFromFileName(doc?.file_name);
-    if (!doc || !mimeType?.startsWith("image/")) {
-      await ctx.reply("Please send an image file, or use Telegram's photo option.");
+    if (!result || !ctx.from?.id) return;
+
+    const session = await getSessionForUser(ctx.from.id);
+    const state = session.state_json || {};
+
+    const isApply = !!state.apply;
+    const isAsk = !!state.ask;
+
+    if (!isApply && !isAsk) {
+      await sendDefaultMessage(ctx, result.acharya, session.preferred_lang || "en");
       return;
     }
-    await analyzeImage(ctx, result.acharya, result.learner, doc.file_id, mimeType);
+
+    if (isApply) {
+      await addApplyPhoto(ctx, result.acharya, result.learner);
+      return;
+    }
+
+    if (isAsk) {
+      const doc = ctx.message?.document;
+      const mimeType = doc?.mime_type || mimeFromFileName(doc?.file_name);
+      if (!doc || !mimeType?.startsWith("image/")) {
+        await ctx.reply("Please send an image file, or use Telegram's photo option.", mainMenuKeyboard(result.acharya));
+        return;
+      }
+      try {
+        await analyzeImage(ctx, result.acharya, result.learner, doc.file_id, mimeType);
+      } finally {
+        await patchBotState(ctx.from.id, { ask: undefined });
+      }
+    }
   });
 
   // Text messages (catch-all)
@@ -1307,7 +1441,7 @@ if (bot) {
 
     // Skip menu texts
     const menuTexts = ["Home", "Learn Modules", "Videos", "Quiz", "Field Apply", "My Progress", "Farm Tools", "Open Website", "Language", "Change Acharya", "Logout",
-      "Ask Farmer Acharya", "Ask Vajra Acharya", "Ask Taksha Acharya", "Type phone number"];
+      "Ask Farmer Acharya", "Ask Vajra Acharya", "Ask Taksha Acharya", "Type phone number", "Cancel Ask", "Cancel Apply"];
     if (menuTexts.includes(text)) return;
 
     const fromId = ctx.from?.id;
@@ -1347,18 +1481,36 @@ if (bot) {
       return;
     }
 
+    const state = session.state_json || {};
+
+    // Handle Cancel Ask
+    if (state.ask && /^(cancel ask|cancel)$/i.test(text)) {
+      await patchBotState(fromId, { ask: undefined });
+      await ctx.reply("Ask mode cancelled.", Markup.removeKeyboard());
+      await sendHome(ctx, acharya, learner);
+      return;
+    }
+
     // Try apply text handler
     if (await handleApplyText(ctx, acharya, learner, text)) return;
 
     // Try tool text handler (farmer only)
     if (acharya === "farmer" && await handleToolText(ctx, acharya, learner, text)) return;
 
-    // Default: answer as AI chat
-    try {
-      await answerTextQuestion(ctx, acharya, learner, text);
-    } catch {
-      await ctx.reply("I could not answer that right now. Please try again.");
+    // If they are in ask mode, answer their question
+    if (state.ask) {
+      try {
+        await answerTextQuestion(ctx, acharya, learner, text);
+      } catch {
+        await ctx.reply("I could not answer that right now. Please try again.", mainMenuKeyboard(acharya));
+      } finally {
+        await patchBotState(fromId, { ask: undefined });
+      }
+      return;
     }
+
+    // If they are not in ask or apply (or tool) mode, return default message!
+    await sendDefaultMessage(ctx, acharya, session.preferred_lang || "en");
   });
 }
 
