@@ -998,26 +998,9 @@ if (bot) {
     const fromId = ctx.from?.id;
     if (!fromId) return;
 
-    const session = await getSessionForUser(fromId);
-    const phone = session.state_json?.authenticatedPhone;
-
-    if (!phone) {
-      await promptAuthentication(ctx);
-      return;
-    }
-
-    if (session.acharya_slug) {
-      const learner = await getTelegramLearner(session.acharya_slug, fromId);
-      if (learner) {
-        await sendHome(ctx, session.acharya_slug, learner);
-        return;
-      }
-      // If phone is authenticated and acharya is selected, but link not found, log in automatically
-      await loginWithPhone(ctx, session.acharya_slug, phone);
-      return;
-    }
-
-    await showAcharyaPicker(ctx);
+    // Reset session to ensure they authenticate whenever starting fresh
+    await deleteSession(fromId);
+    await promptAuthentication(ctx);
   });
 
   bot.command("login", async (ctx) => {
