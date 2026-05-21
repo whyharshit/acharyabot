@@ -313,7 +313,7 @@ export type ToolState =
   | { kind: "fertilizer" }
   | { kind: "diary"; step: "crop" | "activity" | "expense" | "notes"; crop?: string; activity?: string; expense?: number };
 export type ApplyState = { turns: Array<{ text: string; hasPhoto?: boolean }>; moduleId?: string };
-export type BotState = { quiz?: QuizState; tool?: ToolState; apply?: ApplyState };
+export type BotState = { quiz?: QuizState; tool?: ToolState; apply?: ApplyState; authenticatedPhone?: string };
 
 // ── Session types (DB-backed, BUG-06 fix) ───────────────────────────────────
 

@@ -190,9 +190,23 @@ function phoneKeyboard() {
   ]).oneTime().resize();
 }
 
-// ── Acharya Selection ───────────────────────────────────────────────────────
+// ── Acharya Selection / Authentication ───────────────────────────────────────
+
+async function promptAuthentication(ctx: BotContext) {
+  await ctx.reply(
+    "Welcome to Acharya!\n\nPlease authenticate with your phone number to get started.",
+    phoneKeyboard(),
+  );
+}
 
 async function showAcharyaPicker(ctx: BotContext) {
+  if (!ctx.from?.id) return;
+  const session = await getSessionForUser(ctx.from.id);
+  const phone = session.state_json?.authenticatedPhone;
+  if (!phone) {
+    await promptAuthentication(ctx);
+    return;
+  }
   await ctx.reply(
     "Welcome to Acharya!\n\nChoose your Acharya to get started:",
     acharyaPickerKeyboard(),
@@ -202,24 +216,38 @@ async function showAcharyaPicker(ctx: BotContext) {
 async function setAcharya(ctx: BotContext, acharya: AcharyaSlug) {
   if (!ctx.from?.id) return;
 
-  // Persist acharya choice to DB session
-  await patchSession(ctx.from.id, { acharya_slug: acharya });
-
-  const learner = await getTelegramLearner(acharya, ctx.from.id);
-  if (learner) {
-    await patchSession(ctx.from.id, {
-      preferred_lang: learner.preferred_lang || "en",
-      learner_id: learner.id,
-    });
-    await ctx.reply(`Welcome back to ${ACHARYA_NAMES[acharya]}!`, Markup.removeKeyboard());
-    await sendHome(ctx, acharya, learner);
+  const session = await getSessionForUser(ctx.from.id);
+  const phone = session.state_json?.authenticatedPhone;
+  if (!phone) {
+    await promptAuthentication(ctx);
     return;
   }
 
-  await ctx.reply(
-    `You selected ${ACHARYA_NAMES[acharya]}.\n\nPlease login with your phone number first.`,
-    phoneKeyboard(),
-  );
+  // Persist acharya choice to DB session
+  await patchSession(ctx.from.id, { acharya_slug: acharya });
+
+  // Automatically log in with the authenticated phone number
+  await loginWithPhone(ctx, acharya, phone);
+}
+
+async function authenticateUserWithPhone(ctx: BotContext, rawPhone: string) {
+  if (!ctx.from?.id) return;
+  const phone = normalizeIndianPhone(rawPhone);
+  if (!phone) {
+    await ctx.reply("Please send a valid 10-digit Indian mobile number, for example 9876543210.");
+    return;
+  }
+
+  // Save the authenticated phone to state_json
+  await patchBotState(ctx.from.id, { authenticatedPhone: phone });
+  await ctx.reply(`Authentication successful! Phone registered: ${phone}`, Markup.removeKeyboard());
+
+  const session = await getSessionForUser(ctx.from.id);
+  if (session.acharya_slug) {
+    await loginWithPhone(ctx, session.acharya_slug, phone);
+  } else {
+    await showAcharyaPicker(ctx);
+  }
 }
 
 // ── Login ───────────────────────────────────────────────────────────────────
@@ -532,7 +560,14 @@ async function answerTextQuestion(ctx: BotContext, acharya: AcharyaSlug, learner
   const systemPrompt = getSystemPrompt(acharya);
   const prompt = `${systemPrompt}\n\nPreferred language code: ${lang}. Match the user's language when possible.\nUser says: ${text}`;
 
+  const waitMessageText =
+    lang === "hi" ? "मैं सोच रहा हूँ... कृपया प्रतीक्षा करें।" :
+    lang === "bn" ? "আমি ভাবছি... দয়া করে অপেক্ষা করুন।" :
+    "Thinking... Please wait, I am preparing your answer.";
+  let tempMsg: any = null;
+
   try {
+    tempMsg = await ctx.reply(waitMessageText);
     const result = await model.generateContent(prompt);
     const answer = result.response.text();
     await logChat(acharya, learner.id, lang, text, answer, Date.now() - started);
@@ -540,6 +575,14 @@ async function answerTextQuestion(ctx: BotContext, acharya: AcharyaSlug, learner
   } catch (err) {
     console.error("Gemini AI error:", err);
     await ctx.reply("I could not answer that right now. Please try again.");
+  } finally {
+    if (tempMsg && ctx.chat?.id) {
+      try {
+        await ctx.telegram.deleteMessage(ctx.chat.id, tempMsg.message_id);
+      } catch (err) {
+        console.error("Failed to delete temp message", err);
+      }
+    }
   }
 }
 
@@ -894,39 +937,56 @@ if (bot) {
     const fromId = ctx.from?.id;
     if (!fromId) return;
 
-    // Check if user already has an Acharya and is logged in (from DB session)
-    const existingAcharya = await getAcharya(fromId);
-    if (existingAcharya) {
-      const learner = await getTelegramLearner(existingAcharya, fromId);
-      if (learner) {
-        await sendHome(ctx, existingAcharya, learner);
-        return;
-      }
-      // Acharya selected but not logged in - prompt login
-      await ctx.reply(
-        `You selected ${ACHARYA_NAMES[existingAcharya]}.\n\nPlease login with your phone number first.`,
-        phoneKeyboard(),
-      );
+    const session = await getSessionForUser(fromId);
+    const phone = session.state_json?.authenticatedPhone;
+
+    if (!phone) {
+      await promptAuthentication(ctx);
       return;
     }
 
-    // No Acharya selected - show picker
+    if (session.acharya_slug) {
+      const learner = await getTelegramLearner(session.acharya_slug, fromId);
+      if (learner) {
+        await sendHome(ctx, session.acharya_slug, learner);
+        return;
+      }
+      // If phone is authenticated and acharya is selected, but link not found, log in automatically
+      await loginWithPhone(ctx, session.acharya_slug, phone);
+      return;
+    }
+
     await showAcharyaPicker(ctx);
   });
 
   bot.command("login", async (ctx) => {
     const fromId = ctx.from?.id;
     if (!fromId) return;
-    const acharya = await getAcharya(fromId);
-    if (!acharya) { await showAcharyaPicker(ctx); return; }
-    await ctx.reply("Send your mobile number to login.", phoneKeyboard());
+    const session = await getSessionForUser(fromId);
+    const phone = session.state_json?.authenticatedPhone;
+    if (!phone) {
+      await promptAuthentication(ctx);
+      return;
+    }
+    if (session.acharya_slug) {
+      await loginWithPhone(ctx, session.acharya_slug, phone);
+    } else {
+      await showAcharyaPicker(ctx);
+    }
   });
 
   bot.hears("Type phone number", async (ctx) => ctx.reply("Type your 10-digit Indian mobile number."));
 
   bot.hears("Change Acharya", async (ctx) => {
     if (ctx.from?.id) {
-      await deleteSession(ctx.from.id);
+      const session = await getSessionForUser(ctx.from.id);
+      const phone = session.state_json?.authenticatedPhone;
+      await saveSession({
+        ...session,
+        acharya_slug: null,
+        learner_id: null,
+        state_json: { authenticatedPhone: phone },
+      });
     }
     await showAcharyaPicker(ctx);
   });
@@ -940,7 +1000,7 @@ if (bot) {
       await deleteSession(ctx.from.id);
     }
     await ctx.reply("You have been logged out.", Markup.removeKeyboard());
-    await showAcharyaPicker(ctx);
+    await promptAuthentication(ctx);
   });
 
   bot.command("logout", async (ctx) => {
@@ -952,12 +1012,22 @@ if (bot) {
       await deleteSession(ctx.from.id);
     }
     await ctx.reply("You have been logged out.", Markup.removeKeyboard());
-    await showAcharyaPicker(ctx);
+    await promptAuthentication(ctx);
   });
 
   // Acharya selection callback
   bot.action(/^ach:(farmer|vajra|taksha)$/, async (ctx) => {
     await ctx.answerCbQuery();
+    const fromId = ctx.from?.id;
+    if (!fromId) return;
+
+    const session = await getSessionForUser(fromId);
+    const phone = session.state_json?.authenticatedPhone;
+    if (!phone) {
+      await promptAuthentication(ctx);
+      return;
+    }
+
     await setAcharya(ctx, ctx.match[1] as AcharyaSlug);
   });
 
@@ -965,32 +1035,49 @@ if (bot) {
   bot.on("contact", async (ctx) => {
     const fromId = ctx.from?.id;
     if (!fromId) return;
-    const acharya = await getAcharya(fromId);
-    if (!acharya) { await showAcharyaPicker(ctx); return; }
     const contact = ctx.message?.contact;
     if (!contact) return;
     if (contact.user_id && contact.user_id !== fromId) {
       await ctx.reply("Please share your own Telegram phone number.");
       return;
     }
-    await loginWithPhone(ctx, acharya, contact.phone_number);
+    await authenticateUserWithPhone(ctx, contact.phone_number);
   });
 
   // Helper: get learner with acharya
   async function requireLearner(ctx: BotContext): Promise<{ acharya: AcharyaSlug; learner: TelegramLearner } | null> {
     const fromId = ctx.from?.id;
     if (!fromId) return null;
-    const acharya = await getAcharya(fromId);
-    if (!acharya) {
+    const session = await getSessionForUser(fromId);
+    const phone = session.state_json?.authenticatedPhone;
+    if (!phone) {
+      await promptAuthentication(ctx);
+      return null;
+    }
+    if (!session.acharya_slug) {
       await showAcharyaPicker(ctx);
       return null;
     }
-    const learner = await getTelegramLearner(acharya, fromId);
+    const learner = await getTelegramLearner(session.acharya_slug, fromId);
     if (!learner) {
+      const name = telegramName(ctx.from!);
+      const newLearner = await upsertTelegramUser(
+        session.acharya_slug,
+        fromId,
+        ctx.chat!.id,
+        phone,
+        name,
+        ctx.from!.username || null,
+        session.preferred_lang || "en",
+      );
+      if (newLearner) {
+        await patchSession(fromId, { learner_id: newLearner.id });
+        return { acharya: session.acharya_slug, learner: newLearner };
+      }
       await ctx.reply("Please login with your phone number first.", phoneKeyboard());
       return null;
     }
-    return { acharya, learner };
+    return { acharya: session.acharya_slug, learner };
   }
 
   // Menu handlers
@@ -1160,11 +1247,29 @@ if (bot) {
 
       const started = Date.now();
       const lang = await getLang(ctx.from.id);
-      const systemPrompt = getSystemPrompt(result.acharya);
-      const prompt = `${systemPrompt}\n\nAnswer this transcribed voice message in under 150 words. Preferred language: ${lang}.\nMessage: ${transcript}`;
-      const answer = (await model.generateContent(prompt)).response.text();
-      await logChat(result.acharya, result.learner.id, lang, `[voice] ${transcript}`, answer, Date.now() - started);
-      await ctx.reply(answer);
+
+      const waitMessageText =
+        lang === "hi" ? "मैं सोच रहा हूँ... कृपया प्रतीक्षा करें।" :
+        lang === "bn" ? "আমি ভাবছি... দয়া করে অপেক্ষা করুন।" :
+        "Thinking... Please wait, I am preparing your answer.";
+      let tempMsg: any = null;
+
+      try {
+        tempMsg = await ctx.reply(waitMessageText);
+        const systemPrompt = getSystemPrompt(result.acharya);
+        const prompt = `${systemPrompt}\n\nAnswer this transcribed voice message in under 150 words. Preferred language: ${lang}.\nMessage: ${transcript}`;
+        const answer = (await model.generateContent(prompt)).response.text();
+        await logChat(result.acharya, result.learner.id, lang, `[voice] ${transcript}`, answer, Date.now() - started);
+        await ctx.reply(answer);
+      } finally {
+        if (tempMsg && ctx.chat?.id) {
+          try {
+            await ctx.telegram.deleteMessage(ctx.chat.id, tempMsg.message_id);
+          } catch (err) {
+            console.error("Failed to delete temp message", err);
+          }
+        }
+      }
     } catch (err) {
       console.error("Voice handler error:", err);
       await ctx.reply("I could not process that voice message. Please try typing your question instead.");
@@ -1207,20 +1312,40 @@ if (bot) {
 
     const fromId = ctx.from?.id;
     if (!fromId) return;
-    const acharya = await getAcharya(fromId);
-    if (!acharya) { await showAcharyaPicker(ctx); return; }
 
-    const learner = await getTelegramLearner(acharya, fromId);
-    if (!learner) {
+    // 1. Check if user is authenticated with a phone number
+    const session = await getSessionForUser(fromId);
+    const phone = session.state_json?.authenticatedPhone;
+
+    if (!phone) {
+      // If not authenticated, check if the typed text is a phone number
       const typedPhone = normalizeIndianPhone(text);
-      if (typedPhone) { await loginWithPhone(ctx, acharya, typedPhone); return; }
-      await ctx.reply("Please login with your phone number first.", phoneKeyboard());
+      if (typedPhone) {
+        await authenticateUserWithPhone(ctx, typedPhone);
+        return;
+      }
+      // Otherwise, prompt them to authenticate first
+      await promptAuthentication(ctx);
       return;
     }
 
-    // Check if this is a phone login
+    // 2. If authenticated but no Acharya is selected, show Acharya picker
+    if (!session.acharya_slug) {
+      await showAcharyaPicker(ctx);
+      return;
+    }
+
+    // 3. Ensure they have a learner record (self-healing lookup/upsert)
+    const result = await requireLearner(ctx);
+    if (!result) return;
+    const { acharya, learner } = result;
+
+    // Check if this is a phone number being typed again
     const typedPhone = normalizeIndianPhone(text);
-    if (typedPhone) { await loginWithPhone(ctx, acharya, typedPhone); return; }
+    if (typedPhone) {
+      await authenticateUserWithPhone(ctx, typedPhone);
+      return;
+    }
 
     // Try apply text handler
     if (await handleApplyText(ctx, acharya, learner, text)) return;
