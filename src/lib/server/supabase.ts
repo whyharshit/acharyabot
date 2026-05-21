@@ -148,22 +148,64 @@ export const ACHARYA_TABLE_CONFIG: Record<AcharyaSlug, AcharyaTableConfig> = {
   taksha: TAKSHA_CONFIG,
 };
 
-// ── Supabase Client ─────────────────────────────────────────────────────────
-
-const url = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
-const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
-const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
-const effectiveKey = serviceKey || anonKey;
+// ── Per-Acharya Supabase Clients (BUG-04 fix) ──────────────────────────────
+//
+// Each Acharya has its own Supabase project. We create a separate client for
+// each so queries hit the correct database.
 
 const authOpts = { persistSession: false, autoRefreshToken: false } as const;
 
-export const db: DB = url && effectiveKey
-  ? createClient(url, effectiveKey, { auth: authOpts })
-  : createClient("https://placeholder.supabase.co", "placeholder", { auth: authOpts });
+function makeClient(url: string, key: string): DB | null {
+  if (!url || !key || url.includes("placeholder") || key === "placeholder") return null;
+  return createClient(url, key, { auth: authOpts });
+}
 
-export const dbConfigured = !!url && !!effectiveKey
-  && !url.includes("placeholder")
-  && effectiveKey !== "placeholder";
+// Vajra (primary / shared)
+const vajraUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
+const vajraKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
+const vajraDb = makeClient(vajraUrl, vajraKey);
+
+// Farmer (separate project)
+const farmerUrl = process.env.FARMER_SUPABASE_URL || "";
+const farmerKey = process.env.FARMER_SUPABASE_SERVICE_ROLE_KEY || process.env.FARMER_SUPABASE_ANON_KEY || "";
+const farmerDb = makeClient(farmerUrl, farmerKey);
+
+// Taksha (separate project)
+const takshaUrl = process.env.TAKSHA_SUPABASE_URL || "";
+const takshaKey = process.env.TAKSHA_SUPABASE_SERVICE_ROLE_KEY || process.env.TAKSHA_SUPABASE_ANON_KEY || "";
+const takshaDb = makeClient(takshaUrl, takshaKey);
+
+// Placeholder for when no client is configured
+const placeholderDb = createClient("https://placeholder.supabase.co", "placeholder", { auth: authOpts });
+
+/** Get the Supabase client for a specific Acharya */
+export function getDb(acharya: AcharyaSlug): DB {
+  switch (acharya) {
+    case "farmer": return farmerDb || placeholderDb;
+    case "vajra": return vajraDb || placeholderDb;
+    case "taksha": return takshaDb || placeholderDb;
+  }
+}
+
+/** Get the shared / session database (Vajra's project) */
+export function getSessionDb(): DB {
+  return vajraDb || placeholderDb;
+}
+
+/** Backwards-compatible export (points to Vajra / shared) */
+export const db: DB = vajraDb || placeholderDb;
+
+/** Per-acharya configured check */
+export function isDbConfigured(acharya: AcharyaSlug): boolean {
+  switch (acharya) {
+    case "farmer": return !!farmerDb;
+    case "vajra": return !!vajraDb;
+    case "taksha": return !!takshaDb;
+  }
+}
+
+/** Legacy: true if at least the primary (Vajra) DB is configured */
+export const dbConfigured = !!vajraDb;
 
 // ── Acharya-aware query helpers ─────────────────────────────────────────────
 
@@ -178,10 +220,18 @@ function maybeSchema(config: AcharyaTableConfig, schemaField: "contentSchema" | 
 
 /**
  * Get a typed Supabase query builder for a specific acharya's table.
+ * Now uses the correct per-acharya DB client.
  */
-export function acharyaTable(config: AcharyaTableConfig, table: Exclude<keyof AcharyaTableConfig, "userCols" | "learnerIdCol" | "moduleIdCol" | "hasIsDeleted" | "hasStatus" | "contentSchema" | "logSchema">) {
+export function acharyaTable(
+  config: AcharyaTableConfig,
+  table: Exclude<keyof AcharyaTableConfig, "userCols" | "learnerIdCol" | "moduleIdCol" | "hasIsDeleted" | "hasStatus" | "contentSchema" | "logSchema">,
+  acharya?: AcharyaSlug,
+) {
   const name = tableName(config, table);
   if (!name) return null;
+
+  // Use the correct per-acharya client
+  const client = acharya ? getDb(acharya) : db;
 
   // Determine schema: Farmer/Vajra use public, Taksha uses content/log schemas
   let schema: string | undefined;
@@ -194,9 +244,9 @@ export function acharyaTable(config: AcharyaTableConfig, table: Exclude<keyof Ac
   }
 
   if (schema) {
-    return db.schema(schema).from(name);
+    return client.schema(schema).from(name);
   }
-  return db.from(name);
+  return client.from(name);
 }
 
 // ── User record types ───────────────────────────────────────────────────────
@@ -265,6 +315,150 @@ export type ToolState =
 export type ApplyState = { turns: Array<{ text: string; hasPhoto?: boolean }>; moduleId?: string };
 export type BotState = { quiz?: QuizState; tool?: ToolState; apply?: ApplyState };
 
+// ── Session types (DB-backed, BUG-06 fix) ───────────────────────────────────
+
+export interface BotSession {
+  telegram_user_id: number;
+  acharya_slug: AcharyaSlug | null;
+  preferred_lang: Lang;
+  learner_id: string | null;
+  state_json: BotState;
+  updated_at: string;
+}
+
+const SESSION_TABLE = "bot_sessions";
+
+// Track whether the session table exists. Starts as unknown (null),
+// becomes true/false after the first probe.
+let sessionTableExists: boolean | null = null;
+
+/**
+ * Check if bot_sessions table exists by doing a lightweight probe.
+ * Caches the result for the lifetime of this serverless instance.
+ */
+async function probeSessionTable(): Promise<boolean> {
+  if (sessionTableExists !== null) return sessionTableExists;
+  const sessionDb = getSessionDb();
+  try {
+    const { error } = await sessionDb.from(SESSION_TABLE).select("telegram_user_id").limit(0);
+    // PGRST204 or PGRST205 means the relation doesn't exist
+    if (error && (error.code === "PGRST204" || error.code === "PGRST205" || error.code === "42P01" || error.message?.includes("does not exist"))) {
+      sessionTableExists = false;
+      return false;
+    }
+    sessionTableExists = !error;
+    return sessionTableExists;
+  } catch {
+    sessionTableExists = false;
+    return false;
+  }
+}
+
+/**
+ * Returns the SQL needed to create the bot_sessions table.
+ * Can be run via the Supabase Dashboard SQL Editor or any
+ * direct Postgres connection.
+ */
+export function getSessionTableSQL(): string {
+  return `
+CREATE TABLE IF NOT EXISTS public.bot_sessions (
+  id              uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+  telegram_user_id bigint NOT NULL UNIQUE,
+  acharya_slug    text CHECK (acharya_slug IN ('farmer', 'vajra', 'taksha')),
+  preferred_lang  text DEFAULT 'en' CHECK (preferred_lang IN ('en', 'hi', 'bn')),
+  learner_id      text,
+  state_json      jsonb DEFAULT '{}'::jsonb,
+  created_at      timestamptz DEFAULT now(),
+  updated_at      timestamptz DEFAULT now()
+);
+ALTER TABLE public.bot_sessions ENABLE ROW LEVEL SECURITY;
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = 'bot_sessions' AND policyname = 'Service role full access') THEN
+    CREATE POLICY "Service role full access" ON public.bot_sessions FOR ALL TO service_role USING (true) WITH CHECK (true);
+  END IF;
+END $$;
+`.trim();
+}
+
+/**
+ * Load session from the shared (Vajra) database.
+ * Falls back to a default empty session if not found or table doesn't exist.
+ */
+export async function loadSession(telegramUserId: number): Promise<BotSession> {
+  const fallback: BotSession = {
+    telegram_user_id: telegramUserId,
+    acharya_slug: null,
+    preferred_lang: "en",
+    learner_id: null,
+    state_json: {},
+    updated_at: new Date().toISOString(),
+  };
+
+  if (!(await probeSessionTable())) return fallback;
+
+  const sessionDb = getSessionDb();
+  try {
+    const { data, error } = await sessionDb
+      .from(SESSION_TABLE)
+      .select("*")
+      .eq("telegram_user_id", telegramUserId)
+      .maybeSingle();
+
+    if (error || !data) return fallback;
+
+    return {
+      telegram_user_id: data.telegram_user_id,
+      acharya_slug: data.acharya_slug || null,
+      preferred_lang: data.preferred_lang || "en",
+      learner_id: data.learner_id || null,
+      state_json: (typeof data.state_json === "object" && data.state_json !== null ? data.state_json : {}) as BotState,
+      updated_at: data.updated_at || new Date().toISOString(),
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+/**
+ * Save session to the shared (Vajra) database.
+ * Uses upsert on telegram_user_id. No-ops if the table doesn't exist.
+ */
+export async function saveSession(session: BotSession): Promise<void> {
+  if (!(await probeSessionTable())) {
+    console.warn("bot_sessions table not found. Session not persisted. Run the migration SQL from GET /api/setup-session.");
+    return;
+  }
+  const sessionDb = getSessionDb();
+  try {
+    await sessionDb.from(SESSION_TABLE).upsert(
+      {
+        telegram_user_id: session.telegram_user_id,
+        acharya_slug: session.acharya_slug,
+        preferred_lang: session.preferred_lang,
+        learner_id: session.learner_id,
+        state_json: session.state_json,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "telegram_user_id" },
+    );
+  } catch (err) {
+    console.error("Failed to save bot session:", err);
+  }
+}
+
+/**
+ * Delete session (on "Change Acharya"). No-ops if the table doesn't exist.
+ */
+export async function deleteSession(telegramUserId: number): Promise<void> {
+  if (!(await probeSessionTable())) return;
+  const sessionDb = getSessionDb();
+  try {
+    await sessionDb.from(SESSION_TABLE).delete().eq("telegram_user_id", telegramUserId);
+  } catch (err) {
+    console.error("Failed to delete bot session:", err);
+  }
+}
+
 // ── Helper: title/body by language ──────────────────────────────────────────
 
 export function titleOf(row: { title_en?: string | null; title_hi?: string | null; title_bn?: string | null }, lang: Lang): string {
@@ -289,12 +483,12 @@ export async function getTelegramLearner(
   acharya: AcharyaSlug,
   telegramUserId: number
 ): Promise<TelegramLearner | null> {
-  if (!dbConfigured) return null;
+  if (!isDbConfigured(acharya)) return null;
   const config = ACHARYA_TABLE_CONFIG[acharya];
 
   if (config.telegramTable) {
     // Vajra/Taksha: use separate telegram_accounts/telegram_users table
-    const tgTable = acharyaTable(config, "telegramTable");
+    const tgTable = acharyaTable(config, "telegramTable", acharya);
     if (!tgTable) return null;
     const { data: tgData } = await tgTable
       .select("learner_id, preferred_lang")
@@ -302,7 +496,7 @@ export async function getTelegramLearner(
       .maybeSingle();
     if (!tgData?.learner_id) return null;
 
-    const usersTable = acharyaTable(config, "users");
+    const usersTable = acharyaTable(config, "users", acharya);
     if (!usersTable) return null;
     const query = usersTable.select("id, phone, name, preferred_lang").eq("id", tgData.learner_id);
     if (config.hasIsDeleted && config.userCols.isDeleted) {
@@ -315,7 +509,7 @@ export async function getTelegramLearner(
 
   // Farmer: telegram fields on the users table directly
   if (!config.userCols.telegramUserId) return null;
-  const usersTable = acharyaTable(config, "users");
+  const usersTable = acharyaTable(config, "users", acharya);
   if (!usersTable) return null;
   const query = usersTable
     .select("id, phone, name, preferred_lang")
@@ -340,14 +534,14 @@ export async function upsertTelegramUser(
   username: string | null,
   preferredLang: Lang,
 ): Promise<TelegramLearner | null> {
-  if (!dbConfigured) return null;
+  if (!isDbConfigured(acharya)) return null;
   const config = ACHARYA_TABLE_CONFIG[acharya];
   const now = new Date().toISOString();
 
   if (config.telegramTable) {
     // Vajra/Taksha pattern: separate telegram table + users table
-    const usersTable = acharyaTable(config, "users");
-    const tgTable = acharyaTable(config, "telegramTable");
+    const usersTable = acharyaTable(config, "users", acharya);
+    const tgTable = acharyaTable(config, "telegramTable", acharya);
     if (!usersTable || !tgTable) return null;
 
     // Upsert user
@@ -379,7 +573,7 @@ export async function upsertTelegramUser(
   }
 
   // Farmer pattern: telegram fields on users table
-  const usersTable = acharyaTable(config, "users");
+  const usersTable = acharyaTable(config, "users", acharya);
   if (!usersTable || !config.userCols.telegramUserId) return null;
 
   // Unlink any previous telegram account with this phone
@@ -429,9 +623,9 @@ export async function upsertTelegramUser(
 // ── Content queries ─────────────────────────────────────────────────────────
 
 export async function loadModules(acharya: AcharyaSlug): Promise<ModuleRow[]> {
-  if (!dbConfigured) return [];
+  if (!isDbConfigured(acharya)) return [];
   const config = ACHARYA_TABLE_CONFIG[acharya];
-  const table = acharyaTable(config, "modules");
+  const table = acharyaTable(config, "modules", acharya);
   if (!table) return [];
 
   let query = table.select("*").order("sort_order");
@@ -443,9 +637,9 @@ export async function loadModules(acharya: AcharyaSlug): Promise<ModuleRow[]> {
 }
 
 export async function getModuleById(acharya: AcharyaSlug, moduleId: string): Promise<ModuleRow | null> {
-  if (!dbConfigured) return null;
+  if (!isDbConfigured(acharya)) return null;
   const config = ACHARYA_TABLE_CONFIG[acharya];
-  const table = acharyaTable(config, "modules");
+  const table = acharyaTable(config, "modules", acharya);
   if (!table) return null;
 
   let query = table.select("*").eq("id", moduleId);
@@ -455,9 +649,9 @@ export async function getModuleById(acharya: AcharyaSlug, moduleId: string): Pro
 }
 
 export async function loadSections(acharya: AcharyaSlug, moduleId: string): Promise<SectionRow[]> {
-  if (!dbConfigured) return [];
+  if (!isDbConfigured(acharya)) return [];
   const config = ACHARYA_TABLE_CONFIG[acharya];
-  const table = acharyaTable(config, "sections");
+  const table = acharyaTable(config, "sections", acharya);
   if (!table) return [];
 
   let query = table.select("*").eq(config.moduleIdCol, moduleId).order("sort_order");
@@ -467,9 +661,9 @@ export async function loadSections(acharya: AcharyaSlug, moduleId: string): Prom
 }
 
 export async function loadVideos(acharya: AcharyaSlug, moduleId: string): Promise<VideoRow[]> {
-  if (!dbConfigured) return [];
+  if (!isDbConfigured(acharya)) return [];
   const config = ACHARYA_TABLE_CONFIG[acharya];
-  const table = acharyaTable(config, "videos");
+  const table = acharyaTable(config, "videos", acharya);
   if (!table) return [];
 
   let query = table.select("*").eq(config.moduleIdCol, moduleId).order("sort_order").limit(10);
@@ -483,7 +677,7 @@ export async function loadVideos(acharya: AcharyaSlug, moduleId: string): Promis
 
 export async function getProgress(acharya: AcharyaSlug, learnerId: string, moduleId: string) {
   const config = ACHARYA_TABLE_CONFIG[acharya];
-  const table = acharyaTable(config, "progress");
+  const table = acharyaTable(config, "progress", acharya);
   if (!table) return { sections_completed: [], completed: false };
 
   const { data } = await table
@@ -508,7 +702,7 @@ export async function upsertProgress(
   completed: boolean,
 ) {
   const config = ACHARYA_TABLE_CONFIG[acharya];
-  const table = acharyaTable(config, "progress");
+  const table = acharyaTable(config, "progress", acharya);
   if (!table) return;
 
   const record: Record<string, unknown> = {
@@ -525,8 +719,8 @@ export async function upsertProgress(
 
 export async function progressSummary(acharya: AcharyaSlug, learnerId: string) {
   const config = ACHARYA_TABLE_CONFIG[acharya];
-  const progressTable = acharyaTable(config, "progress");
-  const quizTable = acharyaTable(config, "quizAttempts");
+  const progressTable = acharyaTable(config, "progress", acharya);
+  const quizTable = acharyaTable(config, "quizAttempts", acharya);
 
   let progressData: Array<Record<string, unknown>> = [];
   let quizData: Array<Record<string, unknown>> = [];
@@ -560,7 +754,7 @@ export async function progressSummary(acharya: AcharyaSlug, learnerId: string) {
 
 export async function logChat(acharya: AcharyaSlug, learnerId: string, lang: Lang, userMessage: string, aiResponse: string, responseTimeMs?: number) {
   const config = ACHARYA_TABLE_CONFIG[acharya];
-  const table = acharyaTable(config, "chatLogs");
+  const table = acharyaTable(config, "chatLogs", acharya);
   if (!table) return;
   await table.insert({
     [config.learnerIdCol]: learnerId,
@@ -573,7 +767,7 @@ export async function logChat(acharya: AcharyaSlug, learnerId: string, lang: Lan
 
 export async function logQuizAttempt(acharya: AcharyaSlug, learnerId: string, moduleId: string, score: number, total: number, questions: QuizQuestion[]) {
   const config = ACHARYA_TABLE_CONFIG[acharya];
-  const table = acharyaTable(config, "quizAttempts");
+  const table = acharyaTable(config, "quizAttempts", acharya);
   if (!table) return;
   await table.insert({
     [config.learnerIdCol]: learnerId,
@@ -586,7 +780,7 @@ export async function logQuizAttempt(acharya: AcharyaSlug, learnerId: string, mo
 
 export async function logApply(acharya: AcharyaSlug, learnerId: string, moduleId: string | undefined, data: Record<string, unknown>) {
   const config = ACHARYA_TABLE_CONFIG[acharya];
-  const table = acharyaTable(config, "applyLogs");
+  const table = acharyaTable(config, "applyLogs", acharya);
   if (!table) return;
   await table.insert({
     [config.learnerIdCol]: learnerId,
@@ -597,7 +791,7 @@ export async function logApply(acharya: AcharyaSlug, learnerId: string, moduleId
 
 export async function logDiary(acharya: AcharyaSlug, learnerId: string, entry: { crop: string; activity: string; expense: number; notes: string }) {
   const config = ACHARYA_TABLE_CONFIG[acharya];
-  const table = acharyaTable(config, "diary");
+  const table = acharyaTable(config, "diary", acharya);
   if (!table) return;
   await table.insert({
     [config.learnerIdCol]: learnerId,
@@ -611,7 +805,7 @@ export async function logDiary(acharya: AcharyaSlug, learnerId: string, entry: {
 
 export async function logEvent(acharya: AcharyaSlug, learnerId: string | null, eventType: string, eventData?: Record<string, unknown>) {
   const config = ACHARYA_TABLE_CONFIG[acharya];
-  const table = acharyaTable(config, "events");
+  const table = acharyaTable(config, "events", acharya);
   if (!table) return;
   await table.insert({
     [config.learnerIdCol]: learnerId,
@@ -622,7 +816,7 @@ export async function logEvent(acharya: AcharyaSlug, learnerId: string | null, e
 
 export async function recentModuleForLearner(acharya: AcharyaSlug, learnerId: string): Promise<ModuleRow | null> {
   const config = ACHARYA_TABLE_CONFIG[acharya];
-  const progressTable = acharyaTable(config, "progress");
+  const progressTable = acharyaTable(config, "progress", acharya);
   if (progressTable) {
     const { data } = await progressTable
       .select(config.moduleIdCol)

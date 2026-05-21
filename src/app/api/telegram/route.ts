@@ -8,7 +8,7 @@ import {
   getSystemPrompt,
 } from "@/lib/system-prompts";
 import {
-  dbConfigured,
+  isDbConfigured,
   type Lang,
   type TelegramLearner,
   type ModuleRow,
@@ -19,6 +19,7 @@ import {
   type ToolState,
   type ApplyState,
   type BotState,
+  type BotSession,
   getTelegramLearner,
   upsertTelegramUser,
   loadModules,
@@ -37,6 +38,9 @@ import {
   titleOf,
   bodyOf,
   telegramName,
+  loadSession,
+  saveSession,
+  deleteSession,
 } from "@/lib/server/supabase";
 
 export const runtime = "nodejs";
@@ -78,11 +82,8 @@ const APP_URLS: Record<AcharyaSlug, string> = {
   taksha: process.env.TAKSHA_APP_URL || "https://taksha-acharya.vercel.app",
 };
 
-// ── In-memory state ─────────────────────────────────────────────────────────
+// ── Session Management (BUG-06 fix: DB-backed instead of in-memory) ────────
 
-const userAcharyas = new Map<number, AcharyaSlug>();
-const userLangs = new Map<number, Lang>();
-const userBotStates = new Map<string, BotState>(); // key: "acharya:learnerId"
 const MODULE_PAGE_SIZE = 8;
 
 // ── Callback prefixes ───────────────────────────────────────────────────────
@@ -110,38 +111,43 @@ function appLink(acharya: AcharyaSlug, path = "/"): string {
   return new URL(path, APP_URLS[acharya]).toString();
 }
 
-function botStateKey(learnerId: string): string {
-  return learnerId; // simplified: keyed by learnerId alone since Acharya context is on user
-}
+// ── Session helpers (DB-backed, BUG-06 fix) ─────────────────────────────────
 
-async function getBotState(learnerId: string): Promise<BotState> {
-  return userBotStates.get(botStateKey(learnerId)) || {};
-}
-
-async function setBotState(learnerId: string, next: BotState) {
-  if (next.quiz || next.tool || next.apply) {
-    userBotStates.set(botStateKey(learnerId), next);
-  } else {
-    userBotStates.delete(botStateKey(learnerId));
-  }
-}
-
-async function patchBotState(learnerId: string, patch: Partial<BotState>) {
-  const current = await getBotState(learnerId);
-  const next: BotState = { ...current, ...patch };
-  await setBotState(learnerId, next);
+async function getSessionForUser(telegramUserId: number): Promise<BotSession> {
+  return loadSession(telegramUserId);
 }
 
 async function getLang(telegramUserId?: number): Promise<Lang> {
   if (!telegramUserId) return "en";
-  const cached = userLangs.get(telegramUserId);
-  if (cached) return cached;
-  return "en";
+  const session = await loadSession(telegramUserId);
+  return session.preferred_lang || "en";
 }
 
 async function getAcharya(telegramUserId?: number): Promise<AcharyaSlug | null> {
   if (!telegramUserId) return null;
-  return userAcharyas.get(telegramUserId) || null;
+  const session = await loadSession(telegramUserId);
+  return session.acharya_slug || null;
+}
+
+async function getBotState(telegramUserId: number): Promise<BotState> {
+  const session = await loadSession(telegramUserId);
+  return session.state_json || {};
+}
+
+async function patchSession(telegramUserId: number, patch: Partial<BotSession>): Promise<void> {
+  const session = await loadSession(telegramUserId);
+  await saveSession({ ...session, ...patch, telegram_user_id: telegramUserId });
+}
+
+async function patchBotState(telegramUserId: number, statePatch: Partial<BotState>): Promise<void> {
+  const session = await loadSession(telegramUserId);
+  const currentState = session.state_json || {};
+  const newState: BotState = { ...currentState, ...statePatch };
+  // Clean up undefined values
+  if (!newState.quiz) delete newState.quiz;
+  if (!newState.tool) delete newState.tool;
+  if (!newState.apply) delete newState.apply;
+  await saveSession({ ...session, state_json: newState });
 }
 
 // ── Menus ───────────────────────────────────────────────────────────────────
@@ -194,11 +200,16 @@ async function showAcharyaPicker(ctx: BotContext) {
 
 async function setAcharya(ctx: BotContext, acharya: AcharyaSlug) {
   if (!ctx.from?.id) return;
-  userAcharyas.set(ctx.from.id, acharya);
+
+  // Persist acharya choice to DB session
+  await patchSession(ctx.from.id, { acharya_slug: acharya });
 
   const learner = await getTelegramLearner(acharya, ctx.from.id);
   if (learner) {
-    userLangs.set(ctx.from.id, learner.preferred_lang || "en");
+    await patchSession(ctx.from.id, {
+      preferred_lang: learner.preferred_lang || "en",
+      learner_id: learner.id,
+    });
     await ctx.reply(`Welcome back to ${ACHARYA_NAMES[acharya]}!`, Markup.removeKeyboard());
     await sendHome(ctx, acharya, learner);
     return;
@@ -221,7 +232,8 @@ async function loginWithPhone(ctx: BotContext, acharya: AcharyaSlug, rawPhone: s
   }
 
   const name = telegramName(ctx.from);
-  const existingLang = await getLang(ctx.from.id);
+  const session = await getSessionForUser(ctx.from.id);
+  const existingLang = session.preferred_lang || "en";
 
   const learner = await upsertTelegramUser(
     acharya,
@@ -238,7 +250,12 @@ async function loginWithPhone(ctx: BotContext, acharya: AcharyaSlug, rawPhone: s
     return;
   }
 
-  userLangs.set(ctx.from.id, learner.preferred_lang || "en");
+  // Persist to DB session
+  await patchSession(ctx.from.id, {
+    preferred_lang: learner.preferred_lang || "en",
+    learner_id: learner.id,
+  });
+
   await logEvent(acharya, learner.id, "telegram_login", { acharya });
   await ctx.reply(`Login complete. Welcome, ${learner.name || "learner"}!`, Markup.removeKeyboard());
   await sendHome(ctx, acharya, learner);
@@ -458,11 +475,12 @@ async function generateQuiz(acharya: AcharyaSlug, moduleId: string, lang: Lang):
 }
 
 async function startQuiz(ctx: BotContext, acharya: AcharyaSlug, learner: TelegramLearner, moduleId: string) {
+  if (!ctx.from?.id) return;
   await ctx.reply("Preparing quiz...");
-  const lang = await getLang(ctx.from?.id);
+  const lang = await getLang(ctx.from.id);
   const { questions } = await generateQuiz(acharya, moduleId, lang);
   const quiz: QuizState = { moduleId, lang, questions, idx: 0, score: 0 };
-  await patchBotState(learner.id, { quiz });
+  await patchBotState(ctx.from.id, { quiz });
   await sendQuizQuestion(ctx, quiz);
 }
 
@@ -477,7 +495,8 @@ async function sendQuizQuestion(ctx: BotContext, state: QuizState) {
 }
 
 async function answerQuiz(ctx: BotContext, acharya: AcharyaSlug, learner: TelegramLearner, optIdx: number) {
-  const state = (await getBotState(learner.id)).quiz;
+  if (!ctx.from?.id) return;
+  const state = (await getBotState(ctx.from.id)).quiz;
   if (!state) { await ctx.reply("Start a quiz from the Quiz menu."); return; }
 
   const q = state.questions[state.idx];
@@ -488,12 +507,12 @@ async function answerQuiz(ctx: BotContext, acharya: AcharyaSlug, learner: Telegr
   await ctx.reply(`${correct ? "<b>Correct!</b>" : "<b>Incorrect.</b>"}\n\n${escapeHtml(q.explanation)}`, { parse_mode: "HTML" });
 
   if (state.idx < state.questions.length) {
-    await patchBotState(learner.id, { quiz: state });
+    await patchBotState(ctx.from.id, { quiz: state });
     await sendQuizQuestion(ctx, state);
     return;
   }
 
-  await patchBotState(learner.id, { quiz: undefined });
+  await patchBotState(ctx.from.id, { quiz: undefined });
   await logQuizAttempt(acharya, learner.id, state.moduleId, state.score, state.questions.length, state.questions);
   await ctx.reply(`Quiz complete.\nScore: ${state.score}/${state.questions.length}`, Markup.inlineKeyboard([
     [Markup.button.callback("Retake", `${CP.quizModule}${state.moduleId}`), Markup.button.url("Open Progress", appLink(acharya, "/progress"))],
@@ -503,7 +522,7 @@ async function answerQuiz(ctx: BotContext, acharya: AcharyaSlug, learner: Telegr
 // ── Ask (AI Chat) ───────────────────────────────────────────────────────────
 
 async function answerTextQuestion(ctx: BotContext, acharya: AcharyaSlug, learner: TelegramLearner, text: string) {
-  if (!model) { await ctx.reply("My AI brain is offline."); return; }
+  if (!model) { await ctx.reply("My AI brain is offline. Please try again later."); return; }
 
   const started = Date.now();
   const lang = await getLang(ctx.from?.id);
@@ -511,11 +530,16 @@ async function answerTextQuestion(ctx: BotContext, acharya: AcharyaSlug, learner
 
   const systemPrompt = getSystemPrompt(acharya);
   const prompt = `${systemPrompt}\n\nPreferred language code: ${lang}. Match the user's language when possible.\nUser says: ${text}`;
-  const result = await model.generateContent(prompt);
-  const answer = result.response.text();
 
-  await logChat(acharya, learner.id, lang, text, answer, Date.now() - started);
-  await ctx.reply(answer);
+  try {
+    const result = await model.generateContent(prompt);
+    const answer = result.response.text();
+    await logChat(acharya, learner.id, lang, text, answer, Date.now() - started);
+    await ctx.reply(answer);
+  } catch (err) {
+    console.error("Gemini AI error:", err);
+    await ctx.reply("I could not answer that right now. Please try again.");
+  }
 }
 
 // ── Image Analysis ──────────────────────────────────────────────────────────
@@ -562,39 +586,70 @@ async function analyzeImage(ctx: BotContext, acharya: AcharyaSlug, learner: Tele
   }
 }
 
-// ── Apply (Field Reports) ───────────────────────────────────────────────────
+// ── Apply (Field Reports) — BUG-05 fix: analyze photos with Gemini ─────────
 
 async function startApply(ctx: BotContext, acharya: AcharyaSlug, learner: TelegramLearner, moduleId: string) {
+  if (!ctx.from?.id) return;
   const mod = await getModuleById(acharya, moduleId);
-  const lang = await getLang(ctx.from?.id);
-  await patchBotState(learner.id, { apply: { turns: [], moduleId } });
+  const lang = await getLang(ctx.from.id);
+  await patchBotState(ctx.from.id, { apply: { turns: [], moduleId } });
   await ctx.reply(
     `Field Apply started${mod ? ` for ${titleOf(mod, lang)}` : ""}.\n\nSend text, voice, or a photo. When finished, type: Submit Progress`,
   );
 }
 
 async function handleApplyText(ctx: BotContext, acharya: AcharyaSlug, learner: TelegramLearner, text: string): Promise<boolean> {
-  const state = (await getBotState(learner.id)).apply;
+  if (!ctx.from?.id) return false;
+  const state = (await getBotState(ctx.from.id)).apply;
   if (!state) return false;
 
   if (/^(submit progress|submit|finish)$/i.test(text.trim())) {
     await submitApply(ctx, acharya, learner, state);
-    await patchBotState(learner.id, { apply: undefined });
+    await patchBotState(ctx.from.id, { apply: undefined });
     return true;
   }
 
   state.turns.push({ text: text.slice(0, 1000) });
-  await patchBotState(learner.id, { apply: state });
+  await patchBotState(ctx.from.id, { apply: state });
   await ctx.reply("Added to your report. Send more details/photo/voice, or type: Submit Progress");
   return true;
 }
 
-async function addApplyPhoto(ctx: BotContext, learner: TelegramLearner): Promise<boolean> {
-  const state = (await getBotState(learner.id)).apply;
+/**
+ * BUG-05 fix: When a photo is submitted during Field Apply, analyze it with
+ * Gemini to extract a brief description. This description is stored alongside
+ * the turn text so the scoring prompt has visibility into what was photographed.
+ */
+async function addApplyPhoto(ctx: BotContext, acharya: AcharyaSlug, learner: TelegramLearner): Promise<boolean> {
+  if (!ctx.from?.id) return false;
+  const state = (await getBotState(ctx.from.id)).apply;
   if (!state) return false;
+
   const caption = ctx.message?.caption || "Photo attached";
-  state.turns.push({ text: caption.slice(0, 1000), hasPhoto: true });
-  await patchBotState(learner.id, { apply: state });
+  let photoDescription = caption;
+
+  // Analyze the photo with Gemini for validation and description
+  const photo = ctx.message?.photo?.[(ctx.message.photo.length || 1) - 1];
+  if (photo && model) {
+    try {
+      await ctx.sendChatAction("typing");
+      const { buffer, mimeType } = await fetchTelegramFile(ctx, photo.file_id);
+      const systemPrompt = getSystemPrompt(acharya);
+      const result = await model.generateContent([
+        { inlineData: { data: buffer.toString("base64"), mimeType } },
+        { text: `${systemPrompt}\n\nBriefly describe this field photo in 1-2 sentences for a progress report. Focus on what is visible: crop condition, work done, tools used, etc. If the image is not relevant to field work, note that. Reply in English.` },
+      ]);
+      const analysis = result.response.text().trim();
+      if (analysis) {
+        photoDescription = `[Photo: ${analysis}] ${caption}`;
+      }
+    } catch {
+      // If analysis fails, keep the caption as-is
+    }
+  }
+
+  state.turns.push({ text: photoDescription.slice(0, 1500), hasPhoto: true });
+  await patchBotState(ctx.from.id, { apply: state });
   await ctx.reply("Photo added to your report. Send more details, or type: Submit Progress");
   return true;
 }
@@ -608,7 +663,7 @@ async function submitApply(ctx: BotContext, acharya: AcharyaSlug, learner: Teleg
   if (model) {
     try {
       const systemPrompt = getSystemPrompt(acharya);
-      const prompt = `${systemPrompt}\n\nEvaluate this field report. Return ONLY JSON:\n{"summary":"one-line summary","score":7,"feedback":"2 short specific sentences","nextStep":"one practical next step"}\nScore 1-10. Reply language code: ${lang}.\nReport:\n${input}`;
+      const prompt = `${systemPrompt}\n\nEvaluate this field report. Return ONLY JSON:\n{"summary":"one-line summary","score":7,"feedback":"2 short specific sentences","nextStep":"one practical next step"}\nScore 1-10. Consider photo evidence as positive. Penalize if photos are irrelevant to the topic. Reply language code: ${lang}.\nReport:\n${input}`;
       const result = await model.generateContent({
         contents: [{ role: "user", parts: [{ text: prompt }] }],
         generationConfig: { responseMimeType: "application/json", maxOutputTokens: 700 },
@@ -647,27 +702,29 @@ async function sendTools(ctx: BotContext, acharya: AcharyaSlug) {
 }
 
 async function handleToolAction(ctx: BotContext, acharya: AcharyaSlug, learner: TelegramLearner, tool: string) {
-  await patchBotState(learner.id, { tool: undefined });
+  if (!ctx.from?.id) return;
+  await patchBotState(ctx.from.id, { tool: undefined });
   if (tool === "weather") {
-    await patchBotState(learner.id, { tool: { kind: "weather" } });
+    await patchBotState(ctx.from.id, { tool: { kind: "weather" } });
     await ctx.reply("Send location as: Weather Kolkata\nFor default Kolkata forecast, type: Weather");
   } else if (tool === "mandi") {
-    await patchBotState(learner.id, { tool: { kind: "mandi" } });
+    await patchBotState(ctx.from.id, { tool: { kind: "mandi" } });
     await ctx.reply("Send crop and optional state as: Mandi Wheat Punjab\nOr: Mandi Paddy");
   } else if (tool === "calendar") {
     await ctx.reply("<b>Crop Calendar</b>\n1. Seed/Nursery - prepare seed and records.\n2. Sowing - sow at recommended spacing.\n3. Irrigation + nutrients - track water, weeds and pests.\n4. Harvest + selling - grade, store, compare markets.", { parse_mode: "HTML" });
   } else if (tool === "fertilizer") {
-    await patchBotState(learner.id, { tool: { kind: "fertilizer" } });
+    await patchBotState(ctx.from.id, { tool: { kind: "fertilizer" } });
     await ctx.reply("Send: Fertilizer area N P K\nExample: Fertilizer 2 40 20 20");
   } else if (tool === "diary") {
-    await patchBotState(learner.id, { tool: { kind: "diary", step: "crop" } });
+    await patchBotState(ctx.from.id, { tool: { kind: "diary", step: "crop" } });
     await ctx.reply("Farm diary: what crop?");
   }
 }
 
 async function handleToolText(ctx: BotContext, acharya: AcharyaSlug, learner: TelegramLearner, text: string): Promise<boolean> {
+  if (!ctx.from?.id) return false;
   const lower = text.toLowerCase();
-  const state = (await getBotState(learner.id)).tool;
+  const state = (await getBotState(ctx.from.id)).tool;
   if (!state && !lower.startsWith("weather") && !lower.startsWith("mandi") && !lower.startsWith("price") && !lower.startsWith("fertilizer")) return false;
 
   if (state?.kind === "diary") {
@@ -682,19 +739,19 @@ async function handleToolText(ctx: BotContext, acharya: AcharyaSlug, learner: Te
     const urea = Math.round((n * area) / 0.46);
     const dap = Math.round((p * area) / 0.46);
     const mop = Math.round((k * area) / 0.60);
-    await patchBotState(learner.id, { tool: undefined });
+    await patchBotState(ctx.from.id, { tool: undefined });
     await ctx.reply(`Fertilizer estimate for ${area} acres:\nUrea: ${urea} kg\nDAP: ${dap} kg\nMOP: ${mop} kg\n\nUse only for planning. Final dose should follow soil test and local KVK advice.`);
     return true;
   }
 
   if (state?.kind === "weather" || lower.startsWith("weather")) {
-    await patchBotState(learner.id, { tool: undefined });
+    await patchBotState(ctx.from.id, { tool: undefined });
     await sendWeather(ctx, text.replace(/^weather/i, "").trim());
     return true;
   }
 
   if (state?.kind === "mandi" || lower.startsWith("mandi") || lower.startsWith("price")) {
-    await patchBotState(learner.id, { tool: undefined });
+    await patchBotState(ctx.from.id, { tool: undefined });
     await sendMandi(ctx, text.replace(/^(mandi|price)/i, "").trim());
     return true;
   }
@@ -758,20 +815,21 @@ async function sendMandi(ctx: BotContext, query: string) {
 }
 
 async function handleDiaryStep(ctx: BotContext, acharya: AcharyaSlug, learner: TelegramLearner, state: Extract<ToolState, { kind: "diary" }>, text: string) {
+  if (!ctx.from?.id) return;
   if (state.step === "crop") {
-    await patchBotState(learner.id, { tool: { ...state, crop: text.slice(0, 120), step: "activity" } });
+    await patchBotState(ctx.from.id, { tool: { ...state, crop: text.slice(0, 120), step: "activity" } });
     await ctx.reply("What activity did you do?");
   } else if (state.step === "activity") {
-    await patchBotState(learner.id, { tool: { ...state, activity: text.slice(0, 160), step: "expense" } });
+    await patchBotState(ctx.from.id, { tool: { ...state, activity: text.slice(0, 160), step: "expense" } });
     await ctx.reply("Expense amount? Send 0 if none.");
   } else if (state.step === "expense") {
     const expense = Number(text.replace(/[^\d.]/g, "")) || 0;
-    await patchBotState(learner.id, { tool: { ...state, expense, step: "notes" } });
+    await patchBotState(ctx.from.id, { tool: { ...state, expense, step: "notes" } });
     await ctx.reply("Any notes? Send '-' if none.");
   } else {
     const notes = text === "-" ? "" : text.slice(0, 1000);
     await logDiary(acharya, learner.id, { crop: state.crop || "", activity: state.activity || "Field activity", expense: state.expense || 0, notes });
-    await patchBotState(learner.id, { tool: undefined });
+    await patchBotState(ctx.from.id, { tool: undefined });
     await ctx.reply("Diary entry saved.");
   }
 }
@@ -793,19 +851,39 @@ async function sendProgress(ctx: BotContext, acharya: AcharyaSlug, learner: Tele
   });
 }
 
-// ── Voice Transcription ────────────────────────────────────────────────────
+// ── Voice Transcription (BUG-03 fix) ───────────────────────────────────────
+//
+// Telegram sends voice messages as .oga files (Opus codec in OGG container).
+// We detect the actual Content-Type from the download response and pass it
+// to Gemini. Gemini supports audio/ogg, audio/mpeg, audio/wav, etc.
 
 async function transcribeVoice(ctx: BotContext): Promise<string | null> {
   if (!model || !ctx.message?.voice) return null;
-  const fileLink = await ctx.telegram.getFileLink(ctx.message.voice.file_id);
-  const response = await fetch(fileLink.href);
-  if (!response.ok) return null;
-  const buffer = Buffer.from(await response.arrayBuffer());
-  const result = await model.generateContent([
-    { text: "Transcribe this voice message. Return only the spoken text in the same language." },
-    { inlineData: { data: buffer.toString("base64"), mimeType: "audio/ogg" } },
-  ]);
-  return result.response.text().trim();
+
+  try {
+    const fileLink = await ctx.telegram.getFileLink(ctx.message.voice.file_id);
+    const response = await fetch(fileLink.href);
+    if (!response.ok) return null;
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.length > 20 * 1024 * 1024) return null; // 20 MB limit
+
+    // Detect MIME type from response headers, default to audio/ogg for Telegram .oga files
+    const contentType = response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
+    const mimeType = contentType && contentType.startsWith("audio/") ? contentType : "audio/ogg";
+
+    const result = await model.generateContent([
+      { text: "Transcribe this voice message. Return only the spoken text in the same language. If you cannot understand the audio, return 'UNCLEAR'." },
+      { inlineData: { data: buffer.toString("base64"), mimeType } },
+    ]);
+
+    const text = result.response.text().trim();
+    if (!text || text === "UNCLEAR") return null;
+    return text;
+  } catch (err) {
+    console.error("Voice transcription error:", err);
+    return null;
+  }
 }
 
 // ── Telegraf Bot Setup ──────────────────────────────────────────────────────
@@ -815,7 +893,7 @@ if (bot) {
     const fromId = ctx.from?.id;
     if (!fromId) return;
 
-    // Check if user already has an Acharya and is logged in
+    // Check if user already has an Acharya and is logged in (from DB session)
     const existingAcharya = await getAcharya(fromId);
     if (existingAcharya) {
       const learner = await getTelegramLearner(existingAcharya, fromId);
@@ -847,8 +925,7 @@ if (bot) {
 
   bot.hears("Change Acharya", async (ctx) => {
     if (ctx.from?.id) {
-      userAcharyas.delete(ctx.from.id);
-      userBotStates.clear();
+      await deleteSession(ctx.from.id);
     }
     await showAcharyaPicker(ctx);
   });
@@ -962,12 +1039,14 @@ if (bot) {
     }
   });
 
-  // Language callback
+  // Language callback — persist to DB session
   bot.action(/^lang_(en|hi|bn)$/, async (ctx) => {
     const result = await requireLearner(ctx);
     if (!result) return;
     const lang = ctx.match[1] as Lang;
-    if (ctx.from?.id) userLangs.set(ctx.from.id, lang);
+    if (ctx.from?.id) {
+      await patchSession(ctx.from.id, { preferred_lang: lang });
+    }
     await ctx.answerCbQuery(`Language set to ${lang}.`);
     await ctx.editMessageText(`Language set to ${lang}.`);
   });
@@ -1035,48 +1114,53 @@ if (bot) {
     if (result) await handleToolAction(ctx, result.acharya, result.learner, ctx.match[1]);
   });
 
-  // Voice messages
+  // Voice messages (BUG-03 fix: improved transcription pipeline)
   bot.on("voice", async (ctx) => {
     const result = await requireLearner(ctx);
-    if (!result) return;
+    if (!result || !ctx.from?.id) return;
     try {
       await ctx.sendChatAction("typing");
-      const started = Date.now();
       const transcript = await transcribeVoice(ctx);
-      if (!transcript) { await ctx.reply("I could not understand that. Please try again."); return; }
+      if (!transcript) { await ctx.reply("I could not understand that voice message. Please try again or type your question."); return; }
 
-      const applyState = (await getBotState(result.learner.id)).apply;
+      const applyState = (await getBotState(ctx.from.id)).apply;
       if (applyState) {
         applyState.turns.push({ text: transcript });
-        await patchBotState(result.learner.id, { apply: applyState });
+        await patchBotState(ctx.from.id, { apply: applyState });
         await ctx.reply(`Added voice note: "${transcript}"\n\nSend more details/photo, or type: Submit Progress`);
         return;
       }
 
-      const lang = await getLang(ctx.from?.id);
+      if (!model) { await ctx.reply("My AI brain is offline."); return; }
+
+      const started = Date.now();
+      const lang = await getLang(ctx.from.id);
       const systemPrompt = getSystemPrompt(result.acharya);
       const prompt = `${systemPrompt}\n\nAnswer this transcribed voice message in under 150 words. Preferred language: ${lang}.\nMessage: ${transcript}`;
-      const answer = (await model!.generateContent(prompt)).response.text();
+      const answer = (await model.generateContent(prompt)).response.text();
       await logChat(result.acharya, result.learner.id, lang, `[voice] ${transcript}`, answer, Date.now() - started);
       await ctx.reply(answer);
-    } catch { await ctx.reply("I could not process that voice message."); }
+    } catch (err) {
+      console.error("Voice handler error:", err);
+      await ctx.reply("I could not process that voice message. Please try typing your question instead.");
+    }
   });
 
-  // Photo messages
+  // Photo messages (BUG-05: updated addApplyPhoto signature)
   bot.on("photo", async (ctx) => {
     const result = await requireLearner(ctx);
     if (!result) return;
-    if (await addApplyPhoto(ctx, result.learner)) return;
+    if (await addApplyPhoto(ctx, result.acharya, result.learner)) return;
     const photo = ctx.message?.photo?.[(ctx.message.photo.length || 1) - 1];
     if (!photo) { await ctx.reply("Please send a clear photo."); return; }
     await analyzeImage(ctx, result.acharya, result.learner, photo.file_id);
   });
 
-  // Document messages
+  // Document messages (BUG-05: updated addApplyPhoto signature)
   bot.on("document", async (ctx) => {
     const result = await requireLearner(ctx);
     if (!result) return;
-    if (await addApplyPhoto(ctx, result.learner)) return;
+    if (await addApplyPhoto(ctx, result.acharya, result.learner)) return;
     const doc = ctx.message?.document;
     const mimeType = doc?.mime_type || mimeFromFileName(doc?.file_name);
     if (!doc || !mimeType?.startsWith("image/")) {
@@ -1146,7 +1230,12 @@ export async function POST(request: Request) {
 export async function GET() {
   return NextResponse.json({
     status: botToken ? "Configured" : "Missing TELEGRAM_BOT_TOKEN",
-    database: dbConfigured ? "Configured" : "Missing Supabase configuration",
+    ai: aiApiKey ? "Configured" : "Missing GEMINI_API_KEY",
+    databases: {
+      farmer: isDbConfigured("farmer") ? "Configured" : "Missing FARMER_SUPABASE_URL",
+      vajra: isDbConfigured("vajra") ? "Configured" : "Missing SUPABASE_URL",
+      taksha: isDbConfigured("taksha") ? "Configured" : "Missing TAKSHA_SUPABASE_URL",
+    },
     acharyas: ["farmer", "vajra", "taksha"],
   });
 }
