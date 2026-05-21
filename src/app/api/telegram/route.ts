@@ -148,6 +148,7 @@ async function patchBotState(telegramUserId: number, statePatch: Partial<BotStat
   if (!newState.quiz) delete newState.quiz;
   if (!newState.tool) delete newState.tool;
   if (!newState.apply) delete newState.apply;
+  if (newState.pendingPhone === undefined) delete newState.pendingPhone;
   await saveSession({ ...session, state_json: newState });
 }
 
@@ -161,24 +162,46 @@ function acharyaPickerKeyboard() {
   ]);
 }
 
-function mainMenuKeyboard(acharya: AcharyaSlug) {
-  const name = ACHARYA_NAMES[acharya];
-  const askLabel = `Ask ${name}`;
+
+const MENU_LABELS = {
+  home: { en: "Home", hi: "होम", bn: "হোম" },
+  learnModules: { en: "Learn Modules", hi: "मॉड्यूल सीखें", bn: "মডিউল শিখুন" },
+  videos: { en: "Videos", hi: "वीडियो", bn: "ভিডিও" },
+  quiz: { en: "Quiz", hi: "प्रश्नोत्तरी", bn: "কুইজ" },
+  fieldApply: { en: "Field Apply", hi: "फील्ड अप्लाई", bn: "মাঠে প্রয়োগ" },
+  myProgress: { en: "My Progress", hi: "मेरी प्रगति", bn: "আমার অগ্রগতি" },
+  askFarmer: { en: "Ask Farmer Acharya", hi: "किसान आचार्य से पूछें", bn: "কৃষক আচার্যকে জিজ্ঞাসা করুন" },
+  askVajra: { en: "Ask Vajra Acharya", hi: "वज्र आचार्य से पूछें", bn: "বজ্র আচার্যকে জিজ্ঞাসা করুন" },
+  askTaksha: { en: "Ask Taksha Acharya", hi: "तक्ष आचार्य से पूछें", bn: "তক্ষ আচার্যকে জিজ্ঞাসা করুন" },
+  farmTools: { en: "Farm Tools", hi: "कृषि उपकरण", bn: "কৃষি সরঞ্জাম" },
+  openWebsite: { en: "Open Website", hi: "वेबसाइट खोलें", bn: "ওয়েবসাইট খুলুন" },
+  language: { en: "Language", hi: "भाषा", bn: "भाषा" },
+  changeAcharya: { en: "Change Acharya", hi: "आचार्य बदलें", bn: "আচার্য পরিবর্তন করুন" },
+  logout: { en: "Logout", hi: "लॉग आउट", bn: "লॉग আউট" },
+};
+
+function mainMenuKeyboard(acharya: AcharyaSlug, lang: Lang = "en") {
+  const L = (key: keyof typeof MENU_LABELS) => MENU_LABELS[key][lang] || MENU_LABELS[key].en;
+
+  let askKey: keyof typeof MENU_LABELS = "askFarmer";
+  if (acharya === "vajra") askKey = "askVajra";
+  else if (acharya === "taksha") askKey = "askTaksha";
+
   const rows: string[][] = [
-    ["Home", "Learn Modules"],
-    ["Videos", "Quiz"],
-    [askLabel, "Field Apply"],
+    [L("home"), L("learnModules")],
+    [L("videos"), L("quiz")],
+    [L(askKey), L("fieldApply")],
   ];
 
   if (acharya === "farmer") {
-    rows.push(["Farm Tools", "My Progress"]);
-    rows.push(["Language", "Open Website"]);
+    rows.push([L("farmTools"), L("myProgress")]);
+    rows.push([L("language"), L("openWebsite")]);
   } else {
-    rows.push(["My Progress", "Language"]);
-    rows.push(["Open Website"]);
+    rows.push([L("myProgress"), L("language")]);
+    rows.push([L("openWebsite")]);
   }
 
-  rows.push(["Change Acharya", "Logout"]);
+  rows.push([L("changeAcharya"), L("logout")]);
 
   return Markup.keyboard(rows).resize();
 }
@@ -207,7 +230,7 @@ async function sendDefaultMessage(ctx: BotContext, acharya: AcharyaSlug, lang: L
   } else {
     text = `Please select an option from the menu.\n\nClick <b>"${askBtnLabel}"</b> to ask a question, or select <b>"Field Apply"</b> to submit a progress report.`;
   }
-  await ctx.reply(text, { parse_mode: "HTML", ...mainMenuKeyboard(acharya) });
+  await ctx.reply(text, { parse_mode: "HTML", ...mainMenuKeyboard(acharya, lang) });
 }
 
 // ── Acharya Selection / Authentication ───────────────────────────────────────
@@ -258,16 +281,9 @@ async function authenticateUserWithPhone(ctx: BotContext, rawPhone: string) {
     return;
   }
 
-  // Save the authenticated phone to state_json
-  await patchBotState(ctx.from.id, { authenticatedPhone: phone });
-  await ctx.reply(`Authentication successful! Phone registered: ${phone}`, Markup.removeKeyboard());
-
-  const session = await getSessionForUser(ctx.from.id);
-  if (session.acharya_slug) {
-    await loginWithPhone(ctx, session.acharya_slug, phone);
-  } else {
-    await showAcharyaPicker(ctx);
-  }
+  // Save the pending phone to state_json and ask for OTP
+  await patchBotState(ctx.from.id, { pendingPhone: phone });
+  await ctx.reply(`We have sent an OTP to ${phone}.\n\nPlease enter the OTP to continue. (Pilot OTP: 123456)`, Markup.removeKeyboard());
 }
 
 // ── Login ───────────────────────────────────────────────────────────────────
@@ -332,7 +348,7 @@ async function sendHome(ctx: BotContext, acharya: AcharyaSlug, learner: Telegram
     "Choose a tool below, or type any question.",
   ].filter(Boolean);
 
-  await ctx.reply(lines.join("\n"), { parse_mode: "HTML", ...mainMenuKeyboard(acharya) });
+  await ctx.reply(lines.join("\n"), { parse_mode: "HTML", ...mainMenuKeyboard(acharya, lang) });
   const quickButtons: InlineButton[] = [];
   if (current) quickButtons.push(Markup.button.callback("Continue Learning", `${CP.module}${current.id}`));
   quickButtons.push(Markup.button.url("Open Website", appLink(acharya, "/")));
@@ -591,10 +607,10 @@ async function answerTextQuestion(ctx: BotContext, acharya: AcharyaSlug, learner
     const result = await model.generateContent(prompt);
     const answer = result.response.text();
     await logChat(acharya, learner.id, lang, text, answer, Date.now() - started);
-    await ctx.reply(answer, mainMenuKeyboard(acharya));
+    await ctx.reply(answer, mainMenuKeyboard(acharya, typeof learner !== "undefined" ? (learner.preferred_lang || "en") : "en"));
   } catch (err) {
     console.error("Gemini AI error:", err);
-    await ctx.reply("I could not answer that right now. Please try again.", mainMenuKeyboard(acharya));
+    await ctx.reply("I could not answer that right now. Please try again.", mainMenuKeyboard(acharya, typeof learner !== "undefined" ? (learner.preferred_lang || "en") : "en"));
   } finally {
     if (tempMsg && ctx.chat?.id) {
       try {
@@ -644,9 +660,9 @@ async function analyzeImage(ctx: BotContext, acharya: AcharyaSlug, learner: Tele
     ]);
     const answer = result.response.text().trim();
     await logChat(acharya, learner.id, lang, `[image: ${mimeType}]`, answer, Date.now() - started);
-    await ctx.reply(answer || "I analyzed the image but got no useful response. Please try a clearer photo.", mainMenuKeyboard(acharya));
+    await ctx.reply(answer || "I analyzed the image but got no useful response. Please try a clearer photo.", mainMenuKeyboard(acharya, typeof learner !== "undefined" ? (learner.preferred_lang || "en") : "en"));
   } catch {
-    await ctx.reply("I could not analyze that image. Please send a clear, well-lit photo.", mainMenuKeyboard(acharya));
+    await ctx.reply("I could not analyze that image. Please send a clear, well-lit photo.", mainMenuKeyboard(acharya, typeof learner !== "undefined" ? (learner.preferred_lang || "en") : "en"));
   }
 }
 
@@ -1021,7 +1037,7 @@ if (bot) {
 
   bot.hears("Type phone number", async (ctx) => ctx.reply("Type your 10-digit Indian mobile number."));
 
-  bot.hears("Change Acharya", async (ctx) => {
+  bot.hears(Object.values(MENU_LABELS.changeAcharya), async (ctx) => {
     if (ctx.from?.id) {
       const session = await getSessionForUser(ctx.from.id);
       const phone = session.state_json?.authenticatedPhone;
@@ -1035,7 +1051,7 @@ if (bot) {
     await showAcharyaPicker(ctx);
   });
 
-  bot.hears("Logout", async (ctx) => {
+  bot.hears(Object.values(MENU_LABELS.logout), async (ctx) => {
     if (ctx.from?.id) {
       const acharya = await getAcharya(ctx.from.id);
       if (acharya) {
@@ -1095,7 +1111,11 @@ if (bot) {
     const session = await getSessionForUser(fromId);
     const phone = session.state_json?.authenticatedPhone;
     if (!phone) {
-      await promptAuthentication(ctx);
+      if (session.state_json?.pendingPhone) {
+        await ctx.reply("Please enter the OTP to continue. (Pilot OTP: 123456)");
+      } else {
+        await promptAuthentication(ctx);
+      }
       return null;
     }
     if (!session.acharya_slug) {
@@ -1125,37 +1145,37 @@ if (bot) {
   }
 
   // Menu handlers
-  bot.hears("Home", async (ctx) => {
+  bot.hears(Object.values(MENU_LABELS.home), async (ctx) => {
     const result = await requireLearner(ctx);
     if (result) await sendHome(ctx, result.acharya, result.learner);
   });
 
-  bot.hears("Learn Modules", async (ctx) => {
+  bot.hears(Object.values(MENU_LABELS.learnModules), async (ctx) => {
     const result = await requireLearner(ctx);
     if (result) await sendModuleList(ctx, result.acharya, result.learner, 0, "learn");
   });
 
-  bot.hears("Videos", async (ctx) => {
+  bot.hears(Object.values(MENU_LABELS.videos), async (ctx) => {
     const result = await requireLearner(ctx);
     if (result) await sendModuleList(ctx, result.acharya, result.learner, 0, "videos");
   });
 
-  bot.hears("Quiz", async (ctx) => {
+  bot.hears(Object.values(MENU_LABELS.quiz), async (ctx) => {
     const result = await requireLearner(ctx);
     if (result) await sendModuleList(ctx, result.acharya, result.learner, 0, "quiz");
   });
 
-  bot.hears("Field Apply", async (ctx) => {
+  bot.hears(Object.values(MENU_LABELS.fieldApply), async (ctx) => {
     const result = await requireLearner(ctx);
     if (result) await sendModuleList(ctx, result.acharya, result.learner, 0, "apply");
   });
 
-  bot.hears("My Progress", async (ctx) => {
+  bot.hears(Object.values(MENU_LABELS.myProgress), async (ctx) => {
     const result = await requireLearner(ctx);
     if (result) await sendProgress(ctx, result.acharya, result.learner);
   });
 
-  bot.hears("Ask Farmer Acharya", async (ctx) => {
+  bot.hears(Object.values(MENU_LABELS.askFarmer), async (ctx) => {
     const result = await requireLearner(ctx);
     if (result && ctx.from?.id) {
       await patchBotState(ctx.from.id, { ask: true });
@@ -1163,7 +1183,7 @@ if (bot) {
     }
   });
 
-  bot.hears("Ask Vajra Acharya", async (ctx) => {
+  bot.hears(Object.values(MENU_LABELS.askVajra), async (ctx) => {
     const result = await requireLearner(ctx);
     if (result && ctx.from?.id) {
       await patchBotState(ctx.from.id, { ask: true });
@@ -1171,7 +1191,7 @@ if (bot) {
     }
   });
 
-  bot.hears("Ask Taksha Acharya", async (ctx) => {
+  bot.hears(Object.values(MENU_LABELS.askTaksha), async (ctx) => {
     const result = await requireLearner(ctx);
     if (result && ctx.from?.id) {
       await patchBotState(ctx.from.id, { ask: true });
@@ -1179,12 +1199,12 @@ if (bot) {
     }
   });
 
-  bot.hears("Farm Tools", async (ctx) => {
+  bot.hears(Object.values(MENU_LABELS.farmTools), async (ctx) => {
     const result = await requireLearner(ctx);
     if (result) await sendTools(ctx, result.acharya);
   });
 
-  bot.hears("Open Website", async (ctx) => {
+  bot.hears(Object.values(MENU_LABELS.openWebsite), async (ctx) => {
     const result = await requireLearner(ctx);
     if (result) {
       await ctx.reply(`Open ${ACHARYA_NAMES[result.acharya]} website:`, Markup.inlineKeyboard([
@@ -1193,7 +1213,7 @@ if (bot) {
     }
   });
 
-  bot.hears("Language", async (ctx) => {
+  bot.hears(Object.values(MENU_LABELS.language), async (ctx) => {
     const result = await requireLearner(ctx);
     if (result) {
       await ctx.reply("Choose your preferred language:", Markup.inlineKeyboard([
@@ -1331,7 +1351,7 @@ if (bot) {
           const prompt = `${systemPrompt}\n\nAnswer this transcribed voice message in under 150 words. Preferred language: ${lang}.\nMessage: ${transcript}`;
           const answer = (await model.generateContent(prompt)).response.text();
           await logChat(result.acharya, result.learner.id, lang, `[voice] ${transcript}`, answer, Date.now() - started);
-          await ctx.reply(answer, mainMenuKeyboard(result.acharya));
+          await ctx.reply(answer, mainMenuKeyboard(result.acharya, (result.learner?.preferred_lang || "en")));
         } finally {
           await patchBotState(ctx.from.id, { ask: undefined });
           if (tempMsg && ctx.chat?.id) {
@@ -1345,7 +1365,7 @@ if (bot) {
       }
     } catch (err) {
       console.error("Voice handler error:", err);
-      await ctx.reply("I could not process that voice message. Please try typing your question instead.", mainMenuKeyboard(result.acharya));
+      await ctx.reply("I could not process that voice message. Please try typing your question instead.", mainMenuKeyboard(result.acharya, (result.learner?.preferred_lang || "en")));
     }
   });
 
@@ -1372,7 +1392,7 @@ if (bot) {
 
     if (isAsk) {
       const photo = ctx.message?.photo?.[(ctx.message.photo.length || 1) - 1];
-      if (!photo) { await ctx.reply("Please send a clear photo.", mainMenuKeyboard(result.acharya)); return; }
+      if (!photo) { await ctx.reply("Please send a clear photo.", mainMenuKeyboard(result.acharya, (result.learner?.preferred_lang || "en"))); return; }
       try {
         await analyzeImage(ctx, result.acharya, result.learner, photo.file_id);
       } finally {
@@ -1406,7 +1426,7 @@ if (bot) {
       const doc = ctx.message?.document;
       const mimeType = doc?.mime_type || mimeFromFileName(doc?.file_name);
       if (!doc || !mimeType?.startsWith("image/")) {
-        await ctx.reply("Please send an image file, or use Telegram's photo option.", mainMenuKeyboard(result.acharya));
+        await ctx.reply("Please send an image file, or use Telegram's photo option.", mainMenuKeyboard(result.acharya, (result.learner?.preferred_lang || "en")));
         return;
       }
       try {
@@ -1423,8 +1443,10 @@ if (bot) {
     if (!text) return;
 
     // Skip menu texts
-    const menuTexts = ["Home", "Learn Modules", "Videos", "Quiz", "Field Apply", "My Progress", "Farm Tools", "Open Website", "Language", "Change Acharya", "Logout",
-      "Ask Farmer Acharya", "Ask Vajra Acharya", "Ask Taksha Acharya", "Type phone number", "Cancel Ask", "Cancel Apply"];
+    const menuTexts = [
+      ...Object.values(MENU_LABELS).flatMap(l => Object.values(l)),
+      "Type phone number", "Cancel Ask", "Cancel Apply"
+    ];
     if (menuTexts.includes(text)) return;
 
     const fromId = ctx.from?.id;
@@ -1435,6 +1457,30 @@ if (bot) {
     const phone = session.state_json?.authenticatedPhone;
 
     if (!phone) {
+      // Check if awaiting OTP
+      if (session.state_json?.pendingPhone) {
+        if (text === "123456") {
+          const pPhone = session.state_json.pendingPhone;
+          await patchBotState(fromId, { authenticatedPhone: pPhone, pendingPhone: undefined });
+          await ctx.reply(`Authentication successful! Phone registered: ${pPhone}`, Markup.removeKeyboard());
+
+          if (session.acharya_slug) {
+            await loginWithPhone(ctx, session.acharya_slug, pPhone);
+          } else {
+            await showAcharyaPicker(ctx);
+          }
+          return;
+        } else {
+          const typedPhone = normalizeIndianPhone(text);
+          if (typedPhone) {
+            await authenticateUserWithPhone(ctx, typedPhone);
+            return;
+          }
+          await ctx.reply("Invalid OTP. Please try again. (Pilot OTP: 123456)");
+          return;
+        }
+      }
+
       // If not authenticated, check if the typed text is a phone number
       const typedPhone = normalizeIndianPhone(text);
       if (typedPhone) {
@@ -1485,7 +1531,7 @@ if (bot) {
       try {
         await answerTextQuestion(ctx, acharya, learner, text);
       } catch {
-        await ctx.reply("I could not answer that right now. Please try again.", mainMenuKeyboard(acharya));
+        await ctx.reply("I could not answer that right now. Please try again.", mainMenuKeyboard(acharya, typeof learner !== "undefined" ? (learner.preferred_lang || "en") : "en"));
       } finally {
         await patchBotState(fromId, { ask: undefined });
       }
