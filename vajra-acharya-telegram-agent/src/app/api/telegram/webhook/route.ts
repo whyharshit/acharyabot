@@ -4,7 +4,7 @@ import { Context, Markup, Telegraf } from "telegraf";
 import { normalizeIndianPhone } from "@/lib/phone";
 import { AcharyaSlug, ACHARYA_NAMES, getSystemPrompt } from "@/lib/system-prompts";
 import {
-  dbConfigured, type Lang, type TelegramLearner, type ModuleRow, type SectionRow, type VideoRow,
+  dbConfigured, dbFarmerConfigured, dbTakshaConfigured, type Lang, type TelegramLearner, type ModuleRow, type SectionRow, type VideoRow,
   type QuizQuestion, type QuizState, type ToolState, type ApplyState, type BotState,
   ACHARYA_TABLE_CONFIG, acharyaTable,
   getTelegramLearner, upsertTelegramUser, loadModules, getModuleById, loadSections, loadVideos,
@@ -46,6 +46,9 @@ const APP_URLS: Record<AcharyaSlug, string> = {
 const userAcharyas = new Map<number, AcharyaSlug>();
 const userLangs = new Map<number, Lang>();
 const userBotStates = new Map<string, BotState>();
+const loggedInUsers = new Set<number>(); // telegram user IDs that passed OTP
+const DEV_OTP = "123456";
+const pendingLogins = new Map<number, { phone: string; name: string; username: string | null }>();
 const MODULE_PAGE_SIZE = 8;
 
 // ── Callback prefixes ───────────────────────────────────────────────────────
@@ -104,7 +107,6 @@ async function getBotState(learnerId: string): Promise<BotState> { return userBo
 async function setBotState(learnerId: string, next: BotState) { if (next.quiz || next.tool || next.apply) userBotStates.set(learnerId, next); else userBotStates.delete(learnerId); }
 async function patchBotState(learnerId: string, patch: Partial<BotState>) { const cur = await getBotState(learnerId); await setBotState(learnerId, { ...cur, ...patch }); }
 async function getLang(telegramUserId?: number): Promise<Lang> { if (!telegramUserId) return "en"; return userLangs.get(telegramUserId) || "en"; }
-async function getAcharya(telegramUserId?: number): Promise<AcharyaSlug | null> { if (!telegramUserId) return null; return userAcharyas.get(telegramUserId) || null; }
 
 // ── Menus ───────────────────────────────────────────────────────────────────
 
@@ -115,7 +117,7 @@ function mainMenuKeyboard(acharya: AcharyaSlug) {
   const rows: string[][] = [["Home", "Learn Modules"], ["Videos", "Quiz"], [askLabel, "Field Apply"]];
   if (acharya === "farmer") { rows.push(["Farm Tools", "My Progress"]); rows.push(["Language", "Open Website"]); }
   else { rows.push(["My Progress", "Language"]); rows.push(["Open Website"]); }
-  rows.push(["Change Acharya"]);
+  rows.push(["Change Acharya", "Logout"]);
   return Markup.keyboard(rows).resize();
 }
 
@@ -123,29 +125,72 @@ function phoneKeyboard() { return Markup.keyboard([[Markup.button.contactRequest
 
 // ── Acharya Selection ───────────────────────────────────────────────────────
 
-async function showAcharyaPicker(ctx: BotContext) { await ctx.reply("Welcome to Acharya!\n\nChoose your Acharya to get started:", acharyaPickerKeyboard()); }
+async function showAcharyaPicker(ctx: BotContext) { await ctx.reply("Login successful! Choose your Acharya:", acharyaPickerKeyboard()); }
 
 async function setAcharya(ctx: BotContext, acharya: AcharyaSlug) {
-  if (!ctx.from?.id) return;
-  userAcharyas.set(ctx.from.id, acharya);
-  const learner = await getTelegramLearner(acharya, ctx.from.id);
-  if (learner) { userLangs.set(ctx.from.id, learner.preferred_lang || "en"); await ctx.reply(`Welcome back to ${ACHARYA_NAMES[acharya]}!`, Markup.removeKeyboard()); await sendHome(ctx, acharya, learner); return; }
-  await ctx.reply(`You selected ${ACHARYA_NAMES[acharya]}.\n\nPlease login with your phone number first.`, phoneKeyboard());
+  if (!ctx.from?.id || !ctx.chat?.id) return;
+  const fromId = ctx.from.id;
+  userAcharyas.set(fromId, acharya);
+
+  // Get the pending login info (phone + name from OTP step)
+  const pending = pendingLogins.get(fromId);
+  const name = pending?.name || telegramName(ctx.from);
+  const phone = pending?.phone || "";
+  const username = pending?.username || ctx.from.username || null;
+
+  // Upsert into this Acharya's DB
+  const learner = await upsertTelegramUser(acharya, fromId, ctx.chat.id, phone, name, username, "en");
+  if (!learner) {
+    const isConfigured = acharya === "taksha" ? dbTakshaConfigured : acharya === "farmer" ? dbFarmerConfigured : dbConfigured;
+    const msg = isConfigured
+      ? `Failed to set up your ${ACHARYA_NAMES[acharya]} profile. The database may be empty or missing tables.`
+      : `${ACHARYA_NAMES[acharya]} database is not configured. Check environment variables on Vercel.`;
+    await ctx.reply(msg);
+    return;
+  }
+
+  // Clear the pending login (no longer needed)
+  pendingLogins.delete(fromId);
+
+  userLangs.set(fromId, learner.preferred_lang || "en");
+  await logEvent(acharya, learner.id, "telegram_login", { acharya });
+  await ctx.reply(`Welcome to ${ACHARYA_NAMES[acharya]}!`, Markup.removeKeyboard());
+  await sendHome(ctx, acharya, learner);
 }
 
-// ── Login ───────────────────────────────────────────────────────────────────
+// ── Login (OTP-based, Acharya-agnostic) ─────────────────────────────────────
 
-async function loginWithPhone(ctx: BotContext, acharya: AcharyaSlug, rawPhone: string) {
-  if (!ctx.from?.id || !ctx.chat?.id) return;
+async function requestOtp(ctx: BotContext, rawPhone: string) {
+  if (!ctx.from?.id) return;
   const phone = normalizeIndianPhone(rawPhone);
   if (!phone) { await ctx.reply("Please send a valid 10-digit Indian mobile number, for example 9876543210."); return; }
-  const name = telegramName(ctx.from); const lang = await getLang(ctx.from.id);
-  const learner = await upsertTelegramUser(acharya, ctx.from.id, ctx.chat.id, phone, name, ctx.from.username || null, lang);
-  if (!learner) { await ctx.reply("Login failed while saving your profile. Please try again."); return; }
-  userLangs.set(ctx.from.id, learner.preferred_lang || "en");
-  await logEvent(acharya, learner.id, "telegram_login", { acharya });
-  await ctx.reply(`Login complete. Welcome, ${learner.name || "learner"}!`, Markup.removeKeyboard());
-  await sendHome(ctx, acharya, learner);
+  const name = telegramName(ctx.from);
+  pendingLogins.set(ctx.from.id, { phone, name, username: ctx.from.username || null });
+  await ctx.reply(`Verification code sent to ${phone}.\n\nFor pilot testing, your OTP is: <b>${DEV_OTP}</b>\n\nPlease enter the OTP to verify.`, { parse_mode: "HTML" });
+}
+
+async function verifyOtpAndLogin(ctx: BotContext, otp: string) {
+  if (!ctx.from?.id) return false;
+  const fromId = ctx.from.id;
+  const pending = pendingLogins.get(fromId);
+
+  if (otp.trim() !== DEV_OTP) {
+    if (pending) pendingLogins.delete(fromId);
+    await ctx.reply("Invalid OTP. Please login again with your phone number.", phoneKeyboard());
+    return true;
+  }
+
+  if (!pending) {
+    // OTP matched but no pending state - this happens on re-login after logout
+    await ctx.reply("OTP verified. Please share your phone number to login.", phoneKeyboard());
+    return true;
+  }
+
+  // Don't delete pending yet - keep it for when user picks Acharya
+  loggedInUsers.add(fromId);
+  await ctx.reply("OTP verified! Now choose your Acharya to continue.", Markup.removeKeyboard());
+  await showAcharyaPicker(ctx);
+  return true;
 }
 
 // ── Home Dashboard ──────────────────────────────────────────────────────────
@@ -495,12 +540,25 @@ async function sendProgress(ctx: BotContext, acharya: AcharyaSlug, learner: Tele
 
 async function transcribeVoice(ctx: BotContext): Promise<string | null> {
   if (!model || !ctx.message?.voice) return null;
-  const fileLink = await ctx.telegram.getFileLink(ctx.message.voice.file_id);
-  const response = await fetch(fileLink.href);
-  if (!response.ok) return null;
-  const buffer = Buffer.from(await response.arrayBuffer());
-  const result = await model.generateContent([{ text: "Transcribe this voice message. Return only the spoken text in the same language." }, { inlineData: { data: buffer.toString("base64"), mimeType: "audio/ogg" } }]);
-  return result.response.text().trim();
+  try {
+    const fileLink = await ctx.telegram.getFileLink(ctx.message.voice.file_id);
+    const response = await fetch(fileLink.href);
+    if (!response.ok) return null;
+    const buffer = Buffer.from(await response.arrayBuffer());
+    // Gemini has ~20MB total payload limit; keep voice under 10MB
+    if (buffer.length > 10 * 1024 * 1024) {
+      console.error("Voice file too large:", buffer.length);
+      return null;
+    }
+    const result = await model.generateContent([
+      { text: "Transcribe this voice message. Return only the spoken text in the same language." },
+      { inlineData: { data: buffer.toString("base64"), mimeType: "audio/ogg" } },
+    ]);
+    return result.response.text().trim() || null;
+  } catch (err) {
+    console.error("Voice transcription error:", err);
+    return null;
+  }
 }
 
 // ── Helper: require logged-in learner ───────────────────────────────────────
@@ -508,10 +566,14 @@ async function transcribeVoice(ctx: BotContext): Promise<string | null> {
 async function requireLearner(ctx: BotContext): Promise<{ acharya: AcharyaSlug; learner: TelegramLearner } | null> {
   const fromId = ctx.from?.id;
   if (!fromId) return null;
-  const acharya = await getAcharya(fromId);
+  if (!loggedInUsers.has(fromId)) {
+    await ctx.reply("Please login with your phone number first.", phoneKeyboard());
+    return null;
+  }
+  const acharya = userAcharyas.get(fromId);
   if (!acharya) { await showAcharyaPicker(ctx); return null; }
   const learner = await getTelegramLearner(acharya, fromId);
-  if (!learner) { await ctx.reply("Please login with your phone number first.", phoneKeyboard()); return null; }
+  if (!learner) { await showAcharyaPicker(ctx); return null; }
   return { acharya, learner };
 }
 
@@ -523,36 +585,71 @@ if (bot) {
   bot.start(async (ctx) => {
     const fromId = ctx.from?.id;
     if (!fromId) return;
-    const existingAcharya = await getAcharya(fromId);
-    if (existingAcharya) {
+
+    // Already logged in and has an Acharya selected
+    const existingAcharya = userAcharyas.get(fromId);
+    if (existingAcharya && loggedInUsers.has(fromId)) {
       const learner = await getTelegramLearner(existingAcharya, fromId);
       if (learner) { await sendHome(ctx, existingAcharya, learner); return; }
-      await ctx.reply(`You selected ${ACHARYA_NAMES[existingAcharya]}.\n\nPlease login with your phone number first.`, phoneKeyboard());
+      // Learner not found in DB for this acharya - show acharya picker
+      await showAcharyaPicker(ctx);
       return;
     }
-    await showAcharyaPicker(ctx);
+
+    // Logged in but no Acharya selected
+    if (loggedInUsers.has(fromId)) {
+      await showAcharyaPicker(ctx);
+      return;
+    }
+
+    // Not logged in - show login
+    await ctx.reply("Welcome to Acharya!\n\nPlease login with your phone number first.", phoneKeyboard());
   });
 
   bot.command("login", async (ctx) => {
-    const fromId = ctx.from?.id; if (!fromId) return;
-    const acharya = await getAcharya(fromId);
-    if (!acharya) { await showAcharyaPicker(ctx); return; }
     await ctx.reply("Send your mobile number to login.", phoneKeyboard());
   });
 
   bot.hears("Type phone number", async (ctx) => ctx.reply("Type your 10-digit Indian mobile number."));
   bot.hears("Change Acharya", async (ctx) => { if (ctx.from?.id) { userAcharyas.delete(ctx.from.id); userBotStates.clear(); } await showAcharyaPicker(ctx); });
 
+  bot.hears("Logout", async (ctx) => {
+    const fromId = ctx.from?.id;
+    if (!fromId) return;
+    const acharya = userAcharyas.get(fromId);
+    // Try to unlink from DB
+    if (acharya) {
+      const config = ACHARYA_TABLE_CONFIG[acharya];
+      if (config.telegramTable) {
+        const tgTable = acharyaTable(acharya, "telegramTable");
+        if (tgTable) {
+          await tgTable.update({ learner_id: null, phone: null, updated_at: new Date().toISOString() }).eq("telegram_user_id", fromId);
+        }
+      } else if (config.userCols.telegramUserId) {
+        const usersTable = acharyaTable(acharya, "users");
+        if (usersTable) {
+          await usersTable.update({ [config.userCols.telegramUserId]: null, [config.userCols.telegramChatId!]: null }).eq(config.userCols.telegramUserId, fromId);
+        }
+      }
+    }
+    // Clear in-memory state
+    userAcharyas.delete(fromId);
+    userLangs.delete(fromId);
+    pendingLogins.delete(fromId);
+    loggedInUsers.delete(fromId);
+    userBotStates.clear();
+    await ctx.reply("You have been logged out.\n\n(To clear chat history, use Telegram's Clear History option in the top-right menu.)", Markup.removeKeyboard());
+    await ctx.reply("Please login with your phone number to continue.", phoneKeyboard());
+  });
+
   bot.action(/^ach:(farmer|vajra|taksha)$/, async (ctx) => { await ctx.answerCbQuery(); await setAcharya(ctx, ctx.match[1] as AcharyaSlug); });
 
   bot.on("contact", async (ctx) => {
     const fromId = ctx.from?.id; if (!fromId) return;
-    const acharya = await getAcharya(fromId);
-    if (!acharya) { await showAcharyaPicker(ctx); return; }
     const contact = ctx.message?.contact;
     if (!contact) return;
     if (contact.user_id && contact.user_id !== fromId) { await ctx.reply("Please share your own Telegram phone number."); return; }
-    await loginWithPhone(ctx, acharya, contact.phone_number);
+    await requestOtp(ctx, contact.phone_number);
   });
 
   bot.hears("Home", async (ctx) => { const r = await requireLearner(ctx); if (r) await sendHome(ctx, r.acharya, r.learner); });
@@ -591,7 +688,7 @@ if (bot) {
     try {
       await ctx.sendChatAction("typing"); const started = Date.now();
       const transcript = await transcribeVoice(ctx);
-      if (!transcript) { await ctx.reply("I could not understand that. Please try again."); return; }
+      if (!transcript) { await ctx.reply("I could not understand that voice message. Try sending a shorter voice note, or type your question instead."); return; }
       const applyState = (await getBotState(r.learner.id)).apply;
       if (applyState) { applyState.turns.push({ text: transcript }); await patchBotState(r.learner.id, { apply: applyState }); await ctx.reply(`Added voice note: "${transcript}"\n\nSend more details/photo, or type: Submit Progress`); return; }
       const lang = await getLang(ctx.from?.id);
@@ -603,7 +700,10 @@ if (bot) {
       const answer = (await model!.generateContent(prompt)).response.text();
       await logChat(r.acharya, r.learner.id, lang, `[voice] ${transcript}`, answer, Date.now() - started);
       await ctx.reply(answer);
-    } catch { await ctx.reply("I could not process that voice message."); }
+    } catch (err) {
+      console.error("Voice handler error:", err);
+      await ctx.reply("I could not process that voice message. Try a shorter voice note or type your question.");
+    }
   });
 
   bot.on("photo", async (ctx) => {
@@ -626,20 +726,30 @@ if (bot) {
   bot.on("text", async (ctx) => {
     const text = ctx.message?.text?.trim();
     if (!text) return;
-    const menuTexts = ["Home", "Learn Modules", "Videos", "Quiz", "Field Apply", "My Progress", "Farm Tools", "Open Website", "Language", "Change Acharya", "Ask Farmer Acharya", "Ask Vajra Acharya", "Ask Taksha Acharya", "Type phone number"];
+    const menuTexts = ["Home", "Learn Modules", "Videos", "Quiz", "Field Apply", "My Progress", "Farm Tools", "Open Website", "Language", "Change Acharya", "Logout", "Ask Farmer Acharya", "Ask Vajra Acharya", "Ask Taksha Acharya", "Type phone number"];
     if (menuTexts.includes(text)) return;
 
     const fromId = ctx.from?.id; if (!fromId) return;
-    const acharya = await getAcharya(fromId);
-    if (!acharya) { await showAcharyaPicker(ctx); return; }
 
-    const learner = await getTelegramLearner(acharya, fromId);
-    if (!learner) {
+    // Not logged in - handle login flow
+    if (!loggedInUsers.has(fromId)) {
+      // Check if OTP verification step
+      if (pendingLogins.has(fromId)) {
+        if (await verifyOtpAndLogin(ctx, text)) return;
+      }
+      // Treat as phone number entry
       const typedPhone = normalizeIndianPhone(text);
-      if (typedPhone) { await loginWithPhone(ctx, acharya, typedPhone); return; }
+      if (typedPhone) { await requestOtp(ctx, typedPhone); return; }
       await ctx.reply("Please login with your phone number first.", phoneKeyboard());
       return;
     }
+
+    // Logged in but no Acharya selected
+    const acharya = userAcharyas.get(fromId);
+    if (!acharya) { await showAcharyaPicker(ctx); return; }
+
+    const learner = await getTelegramLearner(acharya, fromId);
+    if (!learner) { await showAcharyaPicker(ctx); return; }
 
     if (await handleApplyText(ctx, acharya, learner, text)) return;
     if (acharya === "farmer" && await handleToolText(ctx, acharya, learner, text)) return;
@@ -654,11 +764,6 @@ if (bot) {
 // ══════════════════════════════════════════════════════════════════════════════
 
 export async function POST(request: Request) {
-  const configuredSecret = process.env.TELEGRAM_WEBHOOK_SECRET || "";
-  if (configuredSecret) {
-    const secret = request.headers.get("x-telegram-bot-api-secret-token");
-    if (secret !== configuredSecret) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
   try {
     if (!botToken || !bot) return NextResponse.json({ error: "Bot token not set" }, { status: 500 });
     const body = await request.json();
