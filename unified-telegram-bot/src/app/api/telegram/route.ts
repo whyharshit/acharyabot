@@ -41,6 +41,7 @@ import {
   loadSession,
   saveSession,
   deleteSession,
+  unlinkTelegramUser,
 } from "@/lib/server/supabase";
 
 export const runtime = "nodejs";
@@ -177,7 +178,7 @@ function mainMenuKeyboard(acharya: AcharyaSlug) {
     rows.push(["Open Website"]);
   }
 
-  rows.push(["Change Acharya"]);
+  rows.push(["Change Acharya", "Logout"]);
 
   return Markup.keyboard(rows).resize();
 }
@@ -930,6 +931,30 @@ if (bot) {
     await showAcharyaPicker(ctx);
   });
 
+  bot.hears("Logout", async (ctx) => {
+    if (ctx.from?.id) {
+      const acharya = await getAcharya(ctx.from.id);
+      if (acharya) {
+        await unlinkTelegramUser(acharya, ctx.from.id);
+      }
+      await deleteSession(ctx.from.id);
+    }
+    await ctx.reply("You have been logged out.", Markup.removeKeyboard());
+    await showAcharyaPicker(ctx);
+  });
+
+  bot.command("logout", async (ctx) => {
+    if (ctx.from?.id) {
+      const acharya = await getAcharya(ctx.from.id);
+      if (acharya) {
+        await unlinkTelegramUser(acharya, ctx.from.id);
+      }
+      await deleteSession(ctx.from.id);
+    }
+    await ctx.reply("You have been logged out.", Markup.removeKeyboard());
+    await showAcharyaPicker(ctx);
+  });
+
   // Acharya selection callback
   bot.action(/^ach:(farmer|vajra|taksha)$/, async (ctx) => {
     await ctx.answerCbQuery();
@@ -1176,7 +1201,7 @@ if (bot) {
     if (!text) return;
 
     // Skip menu texts
-    const menuTexts = ["Home", "Learn Modules", "Videos", "Quiz", "Field Apply", "My Progress", "Farm Tools", "Open Website", "Language", "Change Acharya",
+    const menuTexts = ["Home", "Learn Modules", "Videos", "Quiz", "Field Apply", "My Progress", "Farm Tools", "Open Website", "Language", "Change Acharya", "Logout",
       "Ask Farmer Acharya", "Ask Vajra Acharya", "Ask Taksha Acharya", "Type phone number"];
     if (menuTexts.includes(text)) return;
 
