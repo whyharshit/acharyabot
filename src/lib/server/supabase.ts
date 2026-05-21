@@ -620,6 +620,46 @@ export async function upsertTelegramUser(
   return (data as TelegramLearner) || null;
 }
 
+/**
+ * Unlink a Telegram account from its database record (Logout).
+ */
+export async function unlinkTelegramUser(
+  acharya: AcharyaSlug,
+  telegramUserId: number
+): Promise<boolean> {
+  if (!isDbConfigured(acharya)) return false;
+  const config = ACHARYA_TABLE_CONFIG[acharya];
+
+  try {
+    if (config.telegramTable) {
+      // Vajra/Taksha pattern: separate telegram table
+      const tgTable = acharyaTable(config, "telegramTable", acharya);
+      if (tgTable) {
+        await tgTable.delete().eq("telegram_user_id", telegramUserId);
+        return true;
+      }
+    } else {
+      // Farmer pattern: telegram fields on users table
+      if (config.userCols.telegramUserId) {
+        const usersTable = acharyaTable(config, "users", acharya);
+        if (usersTable) {
+          await usersTable
+            .update({
+              [config.userCols.telegramUserId]: null,
+              [config.userCols.telegramChatId!]: null,
+              [config.userCols.telegramUsername!]: null,
+            })
+            .eq(config.userCols.telegramUserId, telegramUserId);
+          return true;
+        }
+      }
+    }
+  } catch (err) {
+    console.error("Failed to unlink Telegram user:", err);
+  }
+  return false;
+}
+
 // ── Content queries ─────────────────────────────────────────────────────────
 
 export async function loadModules(acharya: AcharyaSlug): Promise<ModuleRow[]> {
