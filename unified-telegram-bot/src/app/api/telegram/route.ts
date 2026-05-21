@@ -1232,8 +1232,14 @@ if (bot) {
     if (ctx.from?.id) {
       await patchSession(ctx.from.id, { preferred_lang: lang });
     }
-    await ctx.answerCbQuery(`Language set to ${lang}.`);
-    await ctx.editMessageText(`Language set to ${lang}.`);
+    await ctx.answerCbQuery();
+    await ctx.deleteMessage();
+    
+    let msg = `Language set to English.`;
+    if (lang === "hi") msg = "भाषा हिंदी में सेट हो गई है।";
+    if (lang === "bn") msg = "ভাষা বাংলায় সেট করা হয়েছে।";
+    
+    await ctx.reply(msg, mainMenuKeyboard(result.acharya, lang));
   });
 
   // Module list pagination
