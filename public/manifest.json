@@ -1,0 +1,20 @@
+﻿{
+  "name": "Vajra Acharya",
+  "short_name": "Vajra Acharya",
+  "description": "AI-powered electrician training toolkit",
+  "start_url": "/learn",
+  "display": "standalone",
+  "background_color": "#FDFAF6",
+  "theme_color": "#2E5339",
+  "icons": [
+    {
+      "src": "/brand/vajra-acharya-avatar.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml"
+    }
+  ]
+}
+
+
+
+

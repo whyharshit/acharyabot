@@ -1,4 +1,4 @@
-import "server-only";
+﻿import "server-only";
 import { createClient } from "@supabase/supabase-js";
 import type { AcharyaSlug } from "@/lib/system-prompts";
 
@@ -6,6 +6,104 @@ import type { AcharyaSlug } from "@/lib/system-prompts";
 type DB = ReturnType<typeof createClient<any, any, any>>;
 
 export type Lang = "en" | "hi" | "bn";
+
+// ---------------------------------------------------------------------------
+// Legacy Gunakul / Acharya clients (kept for backward compatibility)
+// ---------------------------------------------------------------------------
+
+const url = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
+const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
+const effectiveKey = serviceKey || anonKey;
+
+const authOpts = { persistSession: false, autoRefreshToken: false } as const;
+const platformSchema = process.env.NEXT_PUBLIC_PLATFORM_SCHEMA || "public";
+const acharyaSchema = process.env.NEXT_PUBLIC_ACHARYA_SCHEMA || "public";
+
+export const dbGunakul: DB = url && effectiveKey
+  ? createClient(url, effectiveKey, { auth: authOpts, db: { schema: platformSchema } })
+  : createClient("https://placeholder.supabase.co", "placeholder", {
+      auth: authOpts, db: { schema: platformSchema },
+    });
+
+export const dbAcharya: DB = url && effectiveKey
+  ? createClient(url, effectiveKey, { auth: authOpts, db: { schema: acharyaSchema } })
+  : createClient("https://placeholder.supabase.co", "placeholder", {
+      auth: authOpts, db: { schema: acharyaSchema },
+    });
+
+export const db: DB = dbGunakul;
+
+export const dbConfigured = !!url && !!effectiveKey
+  && url !== "placeholder"
+  && effectiveKey !== "placeholder";
+
+export const ACHARYA_SLUG = process.env.NEXT_PUBLIC_ACHARYA_SLUG || "vajra";
+
+let cachedAcharyaId: string | null = null;
+let acharyaIdPromise: Promise<string | null> | null = null;
+
+export async function getAcharyaId(): Promise<string | null> {
+  if (platformSchema === "public") return null;
+  if (cachedAcharyaId) return cachedAcharyaId;
+  if (acharyaIdPromise) return acharyaIdPromise;
+  if (!dbConfigured) return null;
+  acharyaIdPromise = (async () => {
+    try {
+      const { data, error } = await dbGunakul
+        .from("mst_acharyas")
+        .select("id")
+        .eq("slug", ACHARYA_SLUG)
+        .eq("is_deleted", false)
+        .maybeSingle();
+      if (error || !data) {
+        console.error("[gunakul] acharya lookup failed:", error);
+        return null;
+      }
+      cachedAcharyaId = data.id as string;
+      return cachedAcharyaId;
+    } catch (err) {
+      console.error("[gunakul] acharya lookup threw:", err);
+      return null;
+    } finally {
+      acharyaIdPromise = null;
+    }
+  })();
+  return acharyaIdPromise;
+}
+
+function roleOf(key: string): string | null {
+  if (!key) return null;
+  if (key.startsWith("sb_secret_")) return "service_role";
+  if (key.startsWith("sb_publishable_")) return "anon";
+  if (key.startsWith("eyJ")) {
+    try {
+      const payload = key.split(".")[1];
+      if (!payload) return null;
+      const b64 = payload.replace(/-/g, "+").replace(/_/g, "/");
+      const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+      const json = JSON.parse(Buffer.from(padded, "base64").toString("utf8"));
+      return typeof json.role === "string" ? json.role : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+export const effectiveKeyRole = effectiveKey ? roleOf(effectiveKey) : null;
+export const usingServiceRole = effectiveKeyRole === "service_role";
+
+if (dbConfigured) {
+  const host = (() => { try { return new URL(url).host; } catch { return url; } })();
+  if (usingServiceRole) {
+    console.log(`[acharya] service_role active (${host}), schemas=${platformSchema}+${acharyaSchema}, acharya=${ACHARYA_SLUG}`);
+  } else {
+    console.warn(
+      `\n[acharya] Not using service_role (${host}). anon grants required on ${platformSchema} + ${acharyaSchema}.`
+    );
+  }
+}
 
 // ── Acharya Table Config ────────────────────────────────────────────────────
 
@@ -21,9 +119,7 @@ export interface AcharyaTableConfig {
   events: string | null;
   diary: string | null;
   aiUsage: string | null;
-  // Telegram linking
-  telegramTable: string | null; // separate table for telegram accounts (null = fields on users table)
-  // Column names on the users table
+  telegramTable: string | null;
   userCols: {
     phone: string;
     name: string;
@@ -31,22 +127,15 @@ export interface AcharyaTableConfig {
     isActive: string;
     isDeleted: string | null;
     lastSeen: string;
-    // Telegram fields on users table (when telegramTable is null)
     telegramUserId: string | null;
     telegramChatId: string | null;
     telegramUsername: string | null;
   };
-  // FK column used in progress/quiz/chat/apply for learner reference
   learnerIdCol: string;
-  // Module FK column in sections/videos
   moduleIdCol: string;
-  // Which schema to use for content tables
   contentSchema?: string;
-  // Which schema to use for log tables
   logSchema?: string;
-  // Whether tables use is_deleted filter
   hasIsDeleted: boolean;
-  // Whether tables have a status column
   hasStatus: boolean;
 }
 
@@ -148,64 +237,46 @@ export const ACHARYA_TABLE_CONFIG: Record<AcharyaSlug, AcharyaTableConfig> = {
   taksha: TAKSHA_CONFIG,
 };
 
-// ── Per-Acharya Supabase Clients (BUG-04 fix) ──────────────────────────────
-//
-// Each Acharya has its own Supabase project. We create a separate client for
-// each so queries hit the correct database.
+// ── Per-Acharya Supabase Clients ────────────────────────────────────────────
 
-const authOpts = { persistSession: false, autoRefreshToken: false } as const;
-
-function makeClient(url: string, key: string): DB | null {
-  if (!url || !key || url.includes("placeholder") || key === "placeholder") return null;
-  return createClient(url, key, { auth: authOpts });
+function makeClient(urlStr: string, keyStr: string): DB | null {
+  if (!urlStr || !keyStr || urlStr.includes("placeholder") || keyStr === "placeholder") return null;
+  return createClient(urlStr, keyStr, { auth: authOpts });
 }
 
-// Vajra (primary / shared)
-const vajraUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
-const vajraKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
-const vajraDb = makeClient(vajraUrl, vajraKey);
+const vajraUrl2 = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
+const vajraKey2 = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
+const vajraDb2 = makeClient(vajraUrl2, vajraKey2);
 
-// Farmer (separate project)
-const farmerUrl = process.env.FARMER_SUPABASE_URL || "";
-const farmerKey = process.env.FARMER_SUPABASE_SERVICE_ROLE_KEY || process.env.FARMER_SUPABASE_ANON_KEY || "";
-const farmerDb = makeClient(farmerUrl, farmerKey);
+const farmerUrl2 = process.env.FARMER_SUPABASE_URL || "";
+const farmerKey2 = process.env.FARMER_SUPABASE_SERVICE_ROLE_KEY || process.env.FARMER_SUPABASE_ANON_KEY || "";
+const farmerDb2 = makeClient(farmerUrl2, farmerKey2);
 
-// Taksha (separate project)
-const takshaUrl = process.env.TAKSHA_SUPABASE_URL || "";
-const takshaKey = process.env.TAKSHA_SUPABASE_SERVICE_ROLE_KEY || process.env.TAKSHA_SUPABASE_ANON_KEY || "";
-const takshaDb = makeClient(takshaUrl, takshaKey);
+const takshaUrl2 = process.env.TAKSHA_SUPABASE_URL || "";
+const takshaKey2 = process.env.TAKSHA_SUPABASE_SERVICE_ROLE_KEY || process.env.TAKSHA_SUPABASE_ANON_KEY || "";
+const takshaDb2 = makeClient(takshaUrl2, takshaKey2);
 
-// Placeholder for when no client is configured
 const placeholderDb = createClient("https://placeholder.supabase.co", "placeholder", { auth: authOpts });
 
-/** Get the Supabase client for a specific Acharya */
 export function getDb(acharya: AcharyaSlug): DB {
   switch (acharya) {
-    case "farmer": return farmerDb || placeholderDb;
-    case "vajra": return vajraDb || placeholderDb;
-    case "taksha": return takshaDb || placeholderDb;
+    case "farmer": return farmerDb2 || placeholderDb;
+    case "vajra": return vajraDb2 || placeholderDb;
+    case "taksha": return takshaDb2 || placeholderDb;
   }
 }
 
-/** Get the shared / session database (Vajra's project) */
 export function getSessionDb(): DB {
-  return vajraDb || placeholderDb;
+  return vajraDb2 || placeholderDb;
 }
 
-/** Backwards-compatible export (points to Vajra / shared) */
-export const db: DB = vajraDb || placeholderDb;
-
-/** Per-acharya configured check */
 export function isDbConfigured(acharya: AcharyaSlug): boolean {
   switch (acharya) {
-    case "farmer": return !!farmerDb;
-    case "vajra": return !!vajraDb;
-    case "taksha": return !!takshaDb;
+    case "farmer": return !!farmerDb2;
+    case "vajra": return !!vajraDb2;
+    case "taksha": return !!takshaDb2;
   }
 }
-
-/** Legacy: true if at least the primary (Vajra) DB is configured */
-export const dbConfigured = !!vajraDb;
 
 // ── Acharya-aware query helpers ─────────────────────────────────────────────
 
@@ -218,10 +289,6 @@ function maybeSchema(config: AcharyaTableConfig, schemaField: "contentSchema" | 
   return config[schemaField] || undefined;
 }
 
-/**
- * Get a typed Supabase query builder for a specific acharya's table.
- * Now uses the correct per-acharya DB client.
- */
 export function acharyaTable(
   config: AcharyaTableConfig,
   table: Exclude<keyof AcharyaTableConfig, "userCols" | "learnerIdCol" | "moduleIdCol" | "hasIsDeleted" | "hasStatus" | "contentSchema" | "logSchema">,
@@ -230,10 +297,8 @@ export function acharyaTable(
   const name = tableName(config, table);
   if (!name) return null;
 
-  // Use the correct per-acharya client
-  const client = acharya ? getDb(acharya) : db;
+  const client = acharya ? getDb(acharya) : getSessionDb();
 
-  // Determine schema: Farmer/Vajra use public, Taksha uses content/log schemas
   let schema: string | undefined;
   if (table === "modules" || table === "sections" || table === "videos") {
     schema = maybeSchema(config, "contentSchema");
@@ -266,7 +331,7 @@ export interface TelegramAccount {
   preferred_lang: Lang;
 }
 
-// ── Module / Section / Video types (unified) ────────────────────────────────
+// ── Module / Section / Video types ──────────────────────────────────────────
 
 export interface ModuleRow {
   id: string;
@@ -275,7 +340,6 @@ export interface ModuleRow {
   title_hi?: string | null;
   title_bn?: string | null;
   sort_order?: number | null;
-  // Farmer-specific
   theory_hours?: number | null;
   practical_hours?: number | null;
 }
@@ -303,7 +367,7 @@ export interface VideoRow {
   start_seconds?: number | null;
 }
 
-// ── Bot state types (in-memory) ─────────────────────────────────────────────
+// ── Bot state types ─────────────────────────────────────────────────────────
 
 export type QuizQuestion = { q: string; options: string[]; correct: number; explanation: string };
 export type QuizState = { moduleId: string; lang: Lang; questions: QuizQuestion[]; idx: number; score: number };
@@ -315,7 +379,7 @@ export type ToolState =
 export type ApplyState = { turns: Array<{ text: string; hasPhoto?: boolean }>; moduleId?: string };
 export type BotState = { quiz?: QuizState; tool?: ToolState; apply?: ApplyState; authenticatedPhone?: string; pendingPhone?: string; ask?: boolean };
 
-// ── Session types (DB-backed, BUG-06 fix) ───────────────────────────────────
+// ── Session types ───────────────────────────────────────────────────────────
 
 export interface BotSession {
   telegram_user_id: number;
@@ -327,21 +391,13 @@ export interface BotSession {
 }
 
 const SESSION_TABLE = "bot_sessions";
-
-// Track whether the session table exists. Starts as unknown (null),
-// becomes true/false after the first probe.
 let sessionTableExists: boolean | null = null;
 
-/**
- * Check if bot_sessions table exists by doing a lightweight probe.
- * Caches the result for the lifetime of this serverless instance.
- */
 async function probeSessionTable(): Promise<boolean> {
   if (sessionTableExists !== null) return sessionTableExists;
   const sessionDb = getSessionDb();
   try {
     const { error } = await sessionDb.from(SESSION_TABLE).select("telegram_user_id").limit(0);
-    // PGRST204 or PGRST205 means the relation doesn't exist
     if (error && (error.code === "PGRST204" || error.code === "PGRST205" || error.code === "42P01" || error.message?.includes("does not exist"))) {
       sessionTableExists = false;
       return false;
@@ -354,11 +410,6 @@ async function probeSessionTable(): Promise<boolean> {
   }
 }
 
-/**
- * Returns the SQL needed to create the bot_sessions table.
- * Can be run via the Supabase Dashboard SQL Editor or any
- * direct Postgres connection.
- */
 export function getSessionTableSQL(): string {
   return `
 CREATE TABLE IF NOT EXISTS public.bot_sessions (
@@ -380,10 +431,6 @@ END $$;
 `.trim();
 }
 
-/**
- * Load session from the shared (Vajra) database.
- * Falls back to a default empty session if not found or table doesn't exist.
- */
 export async function loadSession(telegramUserId: number): Promise<BotSession> {
   const fallback: BotSession = {
     telegram_user_id: telegramUserId,
@@ -419,10 +466,6 @@ export async function loadSession(telegramUserId: number): Promise<BotSession> {
   }
 }
 
-/**
- * Save session to the shared (Vajra) database.
- * Uses upsert on telegram_user_id. No-ops if the table doesn't exist.
- */
 export async function saveSession(session: BotSession): Promise<void> {
   if (!(await probeSessionTable())) {
     console.warn("bot_sessions table not found. Session not persisted. Run the migration SQL from GET /api/setup-session.");
@@ -446,9 +489,6 @@ export async function saveSession(session: BotSession): Promise<void> {
   }
 }
 
-/**
- * Delete session (on "Change Acharya"). No-ops if the table doesn't exist.
- */
 export async function deleteSession(telegramUserId: number): Promise<void> {
   if (!(await probeSessionTable())) return;
   const sessionDb = getSessionDb();
@@ -476,9 +516,6 @@ export function telegramName(from: { first_name?: string; last_name?: string; us
 
 // ── User lookup functions ───────────────────────────────────────────────────
 
-/**
- * Look up a Telegram-linked learner for a specific Acharya.
- */
 export async function getTelegramLearner(
   acharya: AcharyaSlug,
   telegramUserId: number
@@ -487,7 +524,6 @@ export async function getTelegramLearner(
   const config = ACHARYA_TABLE_CONFIG[acharya];
 
   if (config.telegramTable) {
-    // Vajra/Taksha: use separate telegram_accounts/telegram_users table
     const tgTable = acharyaTable(config, "telegramTable", acharya);
     if (!tgTable) return null;
     const { data: tgData } = await tgTable
@@ -507,7 +543,6 @@ export async function getTelegramLearner(
     return data as TelegramLearner;
   }
 
-  // Farmer: telegram fields on the users table directly
   if (!config.userCols.telegramUserId) return null;
   const usersTable = acharyaTable(config, "users", acharya);
   if (!usersTable) return null;
@@ -522,9 +557,6 @@ export async function getTelegramLearner(
   return (data as TelegramLearner | null) || null;
 }
 
-/**
- * Upsert a Telegram-linked user for a specific Acharya.
- */
 export async function upsertTelegramUser(
   acharya: AcharyaSlug,
   telegramUserId: number,
@@ -539,12 +571,10 @@ export async function upsertTelegramUser(
   const now = new Date().toISOString();
 
   if (config.telegramTable) {
-    // Vajra/Taksha pattern: separate telegram table + users table
     const usersTable = acharyaTable(config, "users", acharya);
     const tgTable = acharyaTable(config, "telegramTable", acharya);
     if (!usersTable || !tgTable) return null;
 
-    // Upsert user
     const userUpsert: Record<string, unknown> = {
       [config.userCols.phone]: phone,
       [config.userCols.name]: name,
@@ -558,7 +588,6 @@ export async function upsertTelegramUser(
       .single();
     if (!learner) return null;
 
-    // Upsert telegram account
     await tgTable.upsert({
       telegram_user_id: telegramUserId,
       telegram_chat_id: chatId,
@@ -572,11 +601,9 @@ export async function upsertTelegramUser(
     return learner as TelegramLearner;
   }
 
-  // Farmer pattern: telegram fields on users table
   const usersTable = acharyaTable(config, "users", acharya);
   if (!usersTable || !config.userCols.telegramUserId) return null;
 
-  // Unlink any previous telegram account with this phone
   await usersTable
     .update({ [config.userCols.telegramUserId]: null, [config.userCols.telegramChatId!]: null })
     .eq(config.userCols.telegramUserId, telegramUserId)
@@ -620,9 +647,6 @@ export async function upsertTelegramUser(
   return (data as TelegramLearner) || null;
 }
 
-/**
- * Unlink a Telegram account from its database record (Logout).
- */
 export async function unlinkTelegramUser(
   acharya: AcharyaSlug,
   telegramUserId: number
@@ -632,14 +656,12 @@ export async function unlinkTelegramUser(
 
   try {
     if (config.telegramTable) {
-      // Vajra/Taksha pattern: separate telegram table
       const tgTable = acharyaTable(config, "telegramTable", acharya);
       if (tgTable) {
         await tgTable.delete().eq("telegram_user_id", telegramUserId);
         return true;
       }
     } else {
-      // Farmer pattern: telegram fields on users table
       if (config.userCols.telegramUserId) {
         const usersTable = acharyaTable(config, "users", acharya);
         if (usersTable) {

@@ -1,0 +1,21 @@
+{
+  "name": "Farmer Acharya",
+  "short_name": "Farmer",
+  "description": "Practical farming mentor for crop learning, field questions, quizzes, and progress",
+  "start_url": "/learn",
+  "display": "standalone",
+  "background_color": "#FDFAF6",
+  "theme_color": "#2E5339",
+  "icons": [
+    {
+      "src": "/brand/farmer-avatar.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml"
+    },
+    {
+      "src": "/brand/farmer-avatar.svg",
+      "sizes": "192x192",
+      "type": "image/svg+xml"
+    }
+  ]
+}
