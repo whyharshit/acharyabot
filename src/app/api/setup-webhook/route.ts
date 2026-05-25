@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { TELEGRAM_API_BASE } from "@/lib/urls";
 
 export async function GET() {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
@@ -12,7 +13,7 @@ export async function GET() {
 
   const webhookUrl = `${appUrl}/api/telegram`;
   const secretToken = process.env.TELEGRAM_WEBHOOK_SECRET;
-  const setWebhookUrl = new URL(`https://api.telegram.org/bot${botToken}/setWebhook`);
+  const setWebhookUrl = new URL(`${TELEGRAM_API_BASE}/bot${botToken}/setWebhook`);
 
   setWebhookUrl.searchParams.set("url", webhookUrl);
   if (secretToken) setWebhookUrl.searchParams.set("secret_token", secretToken);
