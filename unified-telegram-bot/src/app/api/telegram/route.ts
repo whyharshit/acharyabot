@@ -7,6 +7,7 @@ import {
   ACHARYA_NAMES,
   getSystemPrompt,
 } from "@/lib/system-prompts";
+import { appLink, videoLink, WEATHER_API_URL, MANDI_API_URL } from "@/lib/urls";
 import {
   isDbConfigured,
   type Lang,
@@ -75,14 +76,6 @@ const aiApiKey = process.env.GEMINI_API_KEY;
 const genAI = aiApiKey ? new GoogleGenerativeAI(aiApiKey) : null;
 const model = genAI ? genAI.getGenerativeModel({ model: "gemini-2.5-flash" }) : null;
 
-// ── App URLs ────────────────────────────────────────────────────────────────
-
-const APP_URLS: Record<AcharyaSlug, string> = {
-  farmer: process.env.FARMER_APP_URL || "https://farmer-acharya-app.vercel.app",
-  vajra: process.env.VAJRA_APP_URL || "https://vajra-acharya.vercel.app",
-  taksha: process.env.TAKSHA_APP_URL || "https://taksha-acharya.vercel.app",
-};
-
 // ── Session Management (BUG-06 fix: DB-backed instead of in-memory) ────────
 
 const MODULE_PAGE_SIZE = 8;
@@ -106,10 +99,6 @@ const CP = {
 
 function escapeHtml(value: unknown): string {
   return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-function appLink(acharya: AcharyaSlug, path = "/"): string {
-  return new URL(path, APP_URLS[acharya]).toString();
 }
 
 // ── Session helpers (DB-backed, BUG-06 fix) ─────────────────────────────────
@@ -493,7 +482,7 @@ async function sendVideos(ctx: BotContext, acharya: AcharyaSlug, learner: Telegr
 
   const lines = [`<b>Videos${mod ? `: ${escapeHtml(titleOf(mod, lang))}` : ""}</b>`];
   for (const v of videos) {
-    const url = `https://www.youtube.com/watch?v=${v.youtube_id}${v.start_seconds ? `&t=${v.start_seconds}s` : ""}`;
+    const url = videoLink(v.youtube_id, v.start_seconds);
     lines.push(`\n<b>${escapeHtml(titleOf(v, lang))}</b>${v.duration ? ` (${escapeHtml(v.duration)})` : ""}\n${url}`);
   }
   await ctx.reply(lines.join("\n"), {
@@ -869,7 +858,7 @@ async function sendWeather(ctx: BotContext, query: string) {
     timezone: "auto", forecast_days: "5",
   });
   try {
-    const res = await fetch(`https://api.open-meteo.com/v1/forecast?${qs}`);
+    const res = await fetch(`${WEATHER_API_URL}?${qs}`);
     const data = await res.json();
     const daily = data.daily || {};
     const lines = [`<b>Weather: ${escapeHtml(coords.label)}</b>`];
@@ -904,7 +893,7 @@ async function sendMandi(ctx: BotContext, query: string) {
   const qs = new URLSearchParams({ "api-key": apiKey, format: "json", limit: "5", "filters[commodity]": commodity });
   if (state) qs.set("filters[state]", state);
   try {
-    const res = await fetch(`https://api.data.gov.in/resource/9ef84268-d588-465a-a308-a864a43d0070?${qs}`);
+    const res = await fetch(`${MANDI_API_URL}?${qs}`);
     const data = await res.json();
     const records = Array.isArray(data.records) ? data.records : [];
     if (!records.length) { await ctx.reply("No mandi records found. Try another crop or state."); return; }
